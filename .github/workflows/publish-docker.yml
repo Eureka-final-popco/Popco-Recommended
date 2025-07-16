@@ -1,26 +1,24 @@
-name: Fast Python CI
+name: Docker Build and Verify
 
 on:
   push:
-    branches: [ "dev", "main" ]
+    branches: [ "dev" ]
   pull_request:
-    branches: [ "dev", "main" ]
+    branches: [ "dev" ]
 
 jobs:
-  test:
+  build-and-verify:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 변경사항 감지를 위해 전체 히스토리 가져오기
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    
-    # requirements.txt 변경 감지
+        fetch-depth: 0 # 변경사항 감지를 위해 전체 히스토리 가져오기
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # requirements.txt 변경 감지 (Docker 빌드 캐시 활용을 위함)
     - name: Check if dependencies changed
       id: deps-changed
       run: |
@@ -31,82 +29,74 @@ jobs:
           BASE_SHA="${{ github.event.before }}"
           HEAD_SHA="${{ github.sha }}"
         fi
-        
-        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|setup\.py|pyproject\.toml)" || [ ! -d "venv" ]; then
+
+        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|Dockerfile)" || [ ! -f "Dockerfile" ]; then
           echo "changed=true" >> $GITHUB_OUTPUT
-          echo "✨ Dependencies changed or venv missing - will reinstall"
+          echo "✨ Dependencies or Dockerfile changed - will rebuild Docker image"
         else
           echo "changed=false" >> $GITHUB_OUTPUT
-          echo "⚡ Dependencies unchanged - using cache"
+          echo "⚡ Dependencies and Dockerfile unchanged - using Docker cache"
         fi
-    
-    # 전역 가상환경 캐시 (모든 브랜치 공유)
-    - name: Cache virtual environment
-      if: steps.deps-changed.outputs.changed == 'false'
-      uses: actions/cache@v3
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
       with:
-        path: venv
-        key: ${{ runner.os }}-venv-global-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-venv-global-
-          ${{ runner.os }}-venv-
-    
-    # 전역 pip 캐시 (모든 브랜치 공유)
-    - name: Cache pip dependencies
-      if: steps.deps-changed.outputs.changed == 'true'
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-global-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-global-
-          ${{ runner.os }}-pip-
-    
-    # 의존성 설치 (변경되었을 때만)
-    - name: Install dependencies
-      if: steps.deps-changed.outputs.changed == 'true'
+        context: .
+        push: false # Docker Hub에 푸시하지 않음
+        tags: popco-recommended:latest
+        cache-from: type=gha,scope=build-and-verify # GitHub Actions 캐시 사용
+        cache-to: type=gha,mode=max,scope=build-and-verify # GitHub Actions 캐시 저장
+        load: true # 로컬 Docker 데몬에 이미지 로드 (테스트용)
+
+    - name: Run Docker image smoke test
       run: |
-        python -m venv venv
-        source venv/bin/activate
-        pip install --upgrade pip
-        pip install -r requirements.txt
-        echo "📦 Dependencies installed"
-    
-    # 의존성 스킵 메시지
-    - name: Skip dependency installation
-      if: steps.deps-changed.outputs.changed == 'false'
-      run: echo "⚡ Using cached dependencies - skipping installation"
-    
-    # pytest 캐시
-    - name: Cache pytest
-      uses: actions/cache@v3
-      with:
-        path: .pytest_cache
-        key: ${{ runner.os }}-pytest-${{ hashFiles('**/*.py') }}
-        restore-keys: |
-          ${{ runner.os }}-pytest-
-    
-    # 테스트 실행 (항상 실행)
-    - name: Test with pytest
-      run: |
-        source venv/bin/activate
-        PYTHONPATH=./app pytest -v --tb=short
-      env:
-        DB_HOST: localhost
-        DB_PORT: 5432
-        DB_USERNAME: test
-        DB_PASSWORD: test
-        DB_NAME: test_db
-        ENVIRONMENT: test
-    
-    # 결과 요약
+        echo "🐳 Running Docker smoke test..."
+        
+        # Docker 컨테이너 실행 (백그라운드)
+        docker run --rm -d -p 8000:8000 \
+          --name popco-test \
+          -e DB_HOST=localhost \
+          -e DB_PORT=5432 \
+          -e DB_USERNAME=test \
+          -e DB_PASSWORD=test \
+          -e DB_NAME=test_db \
+          popco-recommended:latest
+        
+        # 컨테이너 시작 대기
+        echo "⏳ Waiting for container to start..."
+        sleep 15
+        
+        # Uvicorn 시작 확인
+        if docker logs popco-test 2>&1 | grep -E "(Uvicorn running|Application startup complete)"; then
+          echo "✅ Docker image started successfully and application is running."
+        else
+          echo "❌ Docker image failed to start properly."
+          echo "📋 Container logs:"
+          docker logs popco-test
+          docker stop popco-test
+          exit 1
+        fi
+        
+        # API 엔드포인트 테스트 (선택사항)
+        echo "🧪 Testing API endpoints..."
+        if curl -f http://localhost:8000/health 2>/dev/null; then
+          echo "✅ Health endpoint is responding"
+        else
+          echo "⚠️ Health endpoint test skipped or failed"
+        fi
+        
+        # 컨테이너 정리
+        docker stop popco-test
+        echo "✅ Smoke test completed successfully"
+
     - name: Test Summary
       if: always()
       run: |
-        echo "## Test Results 🧪" >> $GITHUB_STEP_SUMMARY
+        echo "## Docker Build & Verify Results 🐳" >> $GITHUB_STEP_SUMMARY
         if [ "${{ steps.deps-changed.outputs.changed }}" == "true" ]; then
-          echo "- **Dependencies**: ✨ Reinstalled (changed)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dependencies/Dockerfile**: ✨ Changed - Docker image rebuilt" >> $GITHUB_STEP_SUMMARY
         else
-          echo "- **Dependencies**: ⚡ Cached (unchanged)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dependencies/Dockerfile**: ⚡ Unchanged - Docker cache used" >> $GITHUB_STEP_SUMMARY
         fi
-        echo "- **Tests**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Docker Build**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Smoke Test**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY

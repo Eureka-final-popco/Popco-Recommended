@@ -1,4 +1,4 @@
-name: Build and Test
+name: Fast Python CI
 
 on:
   push:
@@ -7,30 +7,106 @@ on:
     branches: [ "dev" ]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-
+    
     steps:
-    - uses: actions/checkout@v3
-
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 변경사항 감지를 위해 전체 히스토리 가져오기
+    
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
-
+    
+    # requirements.txt 변경 감지
+    - name: Check if dependencies changed
+      id: deps-changed
+      run: |
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+        else
+          BASE_SHA="${{ github.event.before }}"
+          HEAD_SHA="${{ github.sha }}"
+        fi
+        
+        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|setup\.py|pyproject\.toml)" || [ ! -d "venv" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "✨ Dependencies changed or venv missing - will reinstall"
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+          echo "⚡ Dependencies unchanged - using cache"
+        fi
+    
+    # 전역 가상환경 캐시 (모든 브랜치 공유)
+    - name: Cache virtual environment
+      if: steps.deps-changed.outputs.changed == 'false'
+      uses: actions/cache@v3
+      with:
+        path: venv
+        key: ${{ runner.os }}-venv-global-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-venv-global-
+          ${{ runner.os }}-venv-
+    
+    # 전역 pip 캐시 (모든 브랜치 공유)
     - name: Cache pip dependencies
+      if: steps.deps-changed.outputs.changed == 'true'
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        key: ${{ runner.os }}-pip-global-${{ hashFiles('**/requirements.txt') }}
         restore-keys: |
+          ${{ runner.os }}-pip-global-
           ${{ runner.os }}-pip-
-
+    
+    # 의존성 설치 (변경되었을 때만)
     - name: Install dependencies
+      if: steps.deps-changed.outputs.changed == 'true'
       run: |
-        python -m pip install --upgrade pip
+        python -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest
-
+        echo "📦 Dependencies installed"
+    
+    # 의존성 스킵 메시지
+    - name: Skip dependency installation
+      if: steps.deps-changed.outputs.changed == 'false'
+      run: echo "⚡ Using cached dependencies - skipping installation"
+    
+    # pytest 캐시
+    - name: Cache pytest
+      uses: actions/cache@v3
+      with:
+        path: .pytest_cache
+        key: ${{ runner.os }}-pytest-${{ hashFiles('**/*.py') }}
+        restore-keys: |
+          ${{ runner.os }}-pytest-
+    
+    # 테스트 실행 (항상 실행)
     - name: Test with pytest
-      run: PYTHONPATH=./app pytest
+      run: |
+        source venv/bin/activate
+        PYTHONPATH=./app pytest -v --tb=short
+      env:
+        DB_HOST: localhost
+        DB_PORT: 5432
+        DB_USERNAME: test
+        DB_PASSWORD: test
+        DB_NAME: test_db
+        ENVIRONMENT: test
+    
+    # 결과 요약
+    - name: Test Summary
+      if: always()
+      run: |
+        echo "## Test Results 🧪" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.deps-changed.outputs.changed }}" == "true" ]; then
+          echo "- **Dependencies**: ✨ Reinstalled (changed)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Dependencies**: ⚡ Cached (unchanged)" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "- **Tests**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
