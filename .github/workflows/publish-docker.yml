@@ -1,0 +1,86 @@
+name: Docker Build and Verify
+
+on:
+  push:
+    branches: [ "dev", "main" ]
+  pull_request:
+    branches: [ "dev", "main" ]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # 변경사항 감지를 위해 전체 히스토리 가져오기
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # requirements.txt 변경 감지 (Docker 빌드 캐시 활용을 위함)
+    - name: Check if dependencies changed
+      id: deps-changed
+      run: |
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+        else
+          BASE_SHA="${{ github.event.before }}"
+          HEAD_SHA="${{ github.sha }}"
+        fi
+
+        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|Dockerfile)" || [ ! -f "Dockerfile" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "✨ Dependencies or Dockerfile changed - will rebuild Docker image"
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+          echo "⚡ Dependencies and Dockerfile unchanged - using Docker cache"
+        fi
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false # Docker Hub에 푸시하지 않음
+        tags: popco-recommended:latest
+        cache-from: type=gha,scope=build-and-verify # GitHub Actions 캐시 사용
+        cache-to: type=gha,mode=max,scope=build-and-verify # GitHub Actions 캐시 저장
+        load: true # 로컬 Docker 데몬에 이미지 로드 (테스트용)
+
+    - name: Verify Docker image
+      run: |
+        echo "🐳 Verifying Docker image..."
+        
+        # 이미지 존재 확인
+        if docker images popco-recommended:latest | grep -q popco-recommended; then
+          echo "✅ Docker image built successfully"
+        else
+          echo "❌ Docker image not found"
+          exit 1
+        fi
+        
+        # 간단한 실행 테스트 (즉시 종료)
+        echo "🧪 Testing image can run..."
+        docker run --rm \
+          -e DB_HOST=localhost \
+          -e DB_PORT=5432 \
+          -e DB_USERNAME=test \
+          -e DB_PASSWORD=test \
+          -e DB_NAME=test_db \
+          popco-recommended:latest \
+          python -c "print('✅ Image can execute Python successfully')"
+        
+        echo "✅ Docker verification completed"
+
+    - name: Test Summary
+      if: always()
+      run: |
+        echo "## Docker Build & Verify Results 🐳" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.deps-changed.outputs.changed }}" == "true" ]; then
+          echo "- **Dependencies/Dockerfile**: ✨ Changed - Docker image rebuilt" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Dependencies/Dockerfile**: ⚡ Unchanged - Docker cache used" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "- **Docker Build**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Smoke Test**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
