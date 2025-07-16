@@ -33,4 +33,13 @@ jobs:
         pip install pytest
 
     - name: Test with pytest
-      run: PYTHONPATH=./app pytest
+      run: |
+        source venv/bin/activate
+        PYTHONPATH=./app pytest
+      env:
+        DB_HOST: localhost
+        DB_PORT: 5432
+        DB_USERNAME: test
+        DB_PASSWORD: test
+        DB_NAME: test_db
+        ENVIRONMENT: test
