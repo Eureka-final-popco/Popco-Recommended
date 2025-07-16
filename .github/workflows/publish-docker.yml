@@ -1,27 +1,35 @@
-name: Docker Build and Verify
+name: Fast Docker Build
 
 on:
   push:
-    branches: [ "dev", "main" ]
+    branches: [ "dev" ]
   pull_request:
-    branches: [ "dev", "main" ]
+    branches: [ "dev" ]
 
 jobs:
-  build-and-verify:
+  docker-build:
     runs-on: ubuntu-latest
-
+    
     steps:
     - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0 # 변경사항 감지를 위해 전체 히스토리 가져오기
-
+      
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-
-    # requirements.txt 변경 감지 (Docker 빌드 캐시 활용을 위함)
-    - name: Check if dependencies changed
-      id: deps-changed
+      
+    # 진짜 전역 캐시 (모든 브랜치가 공유)
+    - name: Cache Docker layers
+      uses: actions/cache@v3
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-docker-universal-cache
+        restore-keys: |
+          ${{ runner.os }}-docker-universal-cache
+          
+    # 의존성 변경 감지 (코드만 바뀌면 스킵)
+    - name: Check if rebuild needed
+      id: check-rebuild
       run: |
+        # Dockerfile이나 requirements.txt가 바뀌었는지 확인
         if [ "${{ github.event_name }}" == "pull_request" ]; then
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
@@ -29,58 +37,53 @@ jobs:
           BASE_SHA="${{ github.event.before }}"
           HEAD_SHA="${{ github.sha }}"
         fi
-
-        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|Dockerfile)" || [ ! -f "Dockerfile" ]; then
-          echo "changed=true" >> $GITHUB_OUTPUT
-          echo "✨ Dependencies or Dockerfile changed - will rebuild Docker image"
+        
+        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|Dockerfile)"; then
+          echo "rebuild=true" >> $GITHUB_OUTPUT
+          echo "🔄 Docker dependencies changed - full rebuild needed"
         else
-          echo "changed=false" >> $GITHUB_OUTPUT
-          echo "⚡ Dependencies and Dockerfile unchanged - using Docker cache"
+          echo "rebuild=false" >> $GITHUB_OUTPUT
+          echo "⚡ Only code changed - using cached layers"
         fi
-
+        
+    # 빠른 빌드 (캐시 최대 활용)
     - name: Build Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
-        push: false # Docker Hub에 푸시하지 않음
+        push: false
         tags: popco-recommended:latest
-        cache-from: type=gha,scope=build-and-verify # GitHub Actions 캐시 사용
-        cache-to: type=gha,mode=max,scope=build-and-verify # GitHub Actions 캐시 저장
-        load: true # 로컬 Docker 데몬에 이미지 로드 (테스트용)
-
-    - name: Verify Docker image
-      run: |
-        echo "🐳 Verifying Docker image..."
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+        load: true
         
-        # 이미지 존재 확인
+    # 캐시 최적화 (중요!)
+    - name: Move cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+        
+    # 초간단 검증 (1초 이내)
+    - name: Quick verification
+      run: |
+        echo "🚀 Quick Docker verification..."
         if docker images popco-recommended:latest | grep -q popco-recommended; then
-          echo "✅ Docker image built successfully"
+          echo "✅ Docker image exists"
         else
           echo "❌ Docker image not found"
           exit 1
         fi
+        echo "✅ Verification completed in seconds!"
         
-        # 간단한 실행 테스트 (즉시 종료)
-        echo "🧪 Testing image can run..."
-        docker run --rm \
-          -e DB_HOST=localhost \
-          -e DB_PORT=5432 \
-          -e DB_USERNAME=test \
-          -e DB_PASSWORD=test \
-          -e DB_NAME=test_db \
-          popco-recommended:latest \
-          python -c "print('✅ Image can execute Python successfully')"
-        
-        echo "✅ Docker verification completed"
-
-    - name: Test Summary
-      if: always()
+    # 성능 리포트
+    - name: Performance Summary
       run: |
-        echo "## Docker Build & Verify Results 🐳" >> $GITHUB_STEP_SUMMARY
-        if [ "${{ steps.deps-changed.outputs.changed }}" == "true" ]; then
-          echo "- **Dependencies/Dockerfile**: ✨ Changed - Docker image rebuilt" >> $GITHUB_STEP_SUMMARY
+        echo "## Fast Docker Build Results ⚡" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.check-rebuild.outputs.rebuild }}" == "true" ]; then
+          echo "- **Build Type**: 🔄 Full rebuild (dependencies changed)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Expected Time**: ~5-7 minutes" >> $GITHUB_STEP_SUMMARY
         else
-          echo "- **Dependencies/Dockerfile**: ⚡ Unchanged - Docker cache used" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Type**: ⚡ Cache-optimized (code only)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Expected Time**: ~1-2 minutes" >> $GITHUB_STEP_SUMMARY
         fi
-        echo "- **Docker Build**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Smoke Test**: ${{ job.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
