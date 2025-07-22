@@ -124,6 +124,6 @@ jobs:
           run: |
             sleep 30
             echo "서비스 헬스체크..."
-
+    
             # Recommend 서비스 체크
             curl -f http://${{ secrets.SSH_HOST }}:8000/actuator/health || echo "Recommend 서비스 헬스체크 실패"
