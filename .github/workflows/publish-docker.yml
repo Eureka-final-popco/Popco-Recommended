@@ -69,61 +69,50 @@ jobs:
         rm -rf /tmp/.buildx-cache
         mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
-    deploy:
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v4
-
-        - name: Set up SSH agent
-          uses: webfactory/ssh-agent@v0.9.0
-          with:
-            ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-        - name: Deploy to EC2
-          env:
-            SSH_USER: ${{ secrets.SSH_USER }}
-            SSH_HOST: ${{ secrets.SSH_HOST }}
-          run: |
-            ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'EOF'
-              set -e
-
-              echo "=== Popco-Recommended 배포 시작 ==="
-              cd ~/popco-recommend
-
-              # .env 파일 확인
-              if [ ! -f .env ]; then
-                echo "ERROR: .env 파일이 없습니다!"
-                exit 1
-              fi
-
-              # 기존 컨테이너 중지 및 제거
-              echo "1. 기존 컨테이너 중지..."
-              docker-compose -f docker-compose-prod.yml down
-
-              # 이미지 pull
-              echo "2. 최신 이미지 가져오기..."
-              docker-compose -f docker-compose-prod.yml pull
-
-              # 컨테이너 시작
-              echo "3. 새 컨테이너 시작..."
-              docker-compose -f docker-compose-prod.yml up -d
-
-              # 헬스체크
-              echo "4. 서비스 상태 확인..."
-              sleep 10
-              docker-compose -f docker-compose-prod.yml ps
-
-              # 로그 확인
-              echo "5. 초기 로그 확인..."
-              docker-compose -f docker-compose-prod.yml logs --tail=50
-
-              echo "=== 배포 완료 ==="
-            EOF
-
-        - name: Health Check
-          run: |
-            sleep 30
-            echo "서비스 헬스체크..."
-    
-            # Recommend 서비스 체크
-            curl -f http://${{ secrets.SSH_HOST }}:8000/actuator/health || echo "Recommend 서비스 헬스체크 실패"
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Deploy to EC2
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'EOF'
+            set -e
+            echo "=== Popco-Recommended 배포 시작 ==="
+            cd ~/popco-recommend
+            # .env 파일 확인
+            if [ ! -f .env ]; then
+              echo "ERROR: .env 파일이 없습니다!"
+              exit 1
+            fi
+            # 기존 컨테이너 중지 및 제거
+            echo "1. 기존 컨테이너 중지..."
+            docker-compose -f docker-compose-prod.yml down
+            # 이미지 pull
+            echo "2. 최신 이미지 가져오기..."
+            docker-compose -f docker-compose-prod.yml pull
+            # 컨테이너 시작
+            echo "3. 새 컨테이너 시작..."
+            docker-compose -f docker-compose-prod.yml up -d
+            # 헬스체크
+            echo "4. 서비스 상태 확인..."
+            sleep 10
+            docker-compose -f docker-compose-prod.yml ps
+            # 로그 확인
+            echo "5. 초기 로그 확인..."
+            docker-compose -f docker-compose-prod.yml logs --tail=50
+            echo "=== 배포 완료 ==="
+          EOF
+      - name: Health Check
+        run: |
+          sleep 30
+          echo "서비스 헬스체크..."
+  
+          # Recommend 서비스 체크
+          curl -f http://${{ secrets.SSH_HOST }}:8000/actuator/health || echo "Recommend 서비스 헬스체크 실패"
