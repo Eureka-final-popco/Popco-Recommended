@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  popco-recommend:
+    image: ${DOCKER_HUB}/popco-recommend:${IMAGE_TAG:-latest}
+    container_name: popco-recommend
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # KoBERT 모델 로딩 시간 고려
+
+    deploy:
+      resources:
+        limits:
+          memory: 8G  # r5.large 메모리 한계 설정
+        reservations:
+          memory: 4G  # 최소 메모리 보장

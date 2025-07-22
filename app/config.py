@@ -7,11 +7,20 @@ class Settings(BaseSettings):
     DB_USERNAME: str
     DB_PASSWORD: str
     DB_NAME: str
-
+    
     class Config:
-        if os.getenv("DOCKER_ENV"):
-            env_file = ".env"
-        else:
-            env_file = ".env.local"
+        # 환경 우선순위: ENVIRONMENT > DOCKER_ENV > 기본값
+        env_file = ".env.local"  # 기본값
+        
+        def __init__(self):
+            # AWS 배포 환경 (최우선)
+            if os.getenv("ENVIRONMENT") == "production":
+                self.env_file = ".env.prod"
+            # 로컬 도커 환경
+            elif os.getenv("DOCKER_ENV") == "true":
+                self.env_file = ".env.docker"
+            # 로컬 개발 환경 (기본값)
+            else:
+                self.env_file = ".env.local"
 
 settings = Settings()
