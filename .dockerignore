@@ -23,5 +23,7 @@ coverage.xml
 .idea
 README.md
 
+.env.*
+
 app/data_processing/*
 
