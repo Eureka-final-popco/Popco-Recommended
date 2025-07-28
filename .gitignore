@@ -11,3 +11,6 @@ __pycache__/
 # IDEs
 .idea/
 .vscode/
+
+.env.docker
+.env.local
