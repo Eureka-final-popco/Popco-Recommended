@@ -1,126 +1,233 @@
+# data_loader.py
+
+import logging
 import pandas as pd
-import re
-import os
-from sklearn.metrics.pairwise import cosine_similarity
+from typing import Dict, Any, List, Optional, Tuple
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from .state import pbr_app_state
+from app.database import SessionLocal
+from .config import LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS
 
-# 장르 한글 매핑 함수
-def map_genres_to_korean(genres_str):
-    if pd.isna(genres_str) or genres_str == '(no genres listed)':
-        return ["(장르 없음)"]
-    genres = re.split(r'[|,]', genres_str)
-    genres = [g.strip() for g in genres if g.strip()]
-    return list(set(genres))
+logger = logging.getLogger(__name__)
 
-# 제목에서 연도 정보 제거 및 클리닝
-def clean_title(title):
-    if isinstance(title, str):
-        cleaned = re.sub(r'\s*\(\d{4}\)$', '', title).strip() 
-        cleaned = re.sub(r'\s*\(.*\)\s*', '', cleaned) 
-        cleaned = re.sub(r'[^a-zA-Z0-9가-힣\s]', ' ', cleaned) 
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip() 
-        return cleaned.lower()
-    return title
+def load_all_data():
+    logger.info("모든 데이터 로드 시작...")
+    
+    db: Session = SessionLocal() 
+    try:
+        # Contents 데이터 로드 (genres 컬럼 포함하도록 수정)
+        contents_query = """
+        SELECT
+            c.id AS content_id, -- <<< 여기서 contentId_orig를 content_id로 변경!
+            c.title,
+            c.type,
+            c.rating_average,
+            c.rating_count,
+            c.poster_path,
+            GROUP_CONCAT(g.name ORDER BY g.name SEPARATOR '|') AS genres
+        FROM contents c
+        LEFT JOIN content_genres cg ON c.id = cg.content_id AND c.type = cg.content_type
+        LEFT JOIN genres g ON cg.genre_id = g.id 
+        GROUP BY c.id, c.type
+        ORDER BY c.id, c.type
+        """
+        result = db.execute(text(contents_query))
+        contents_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        if 'genres' in contents_df.columns:
+            contents_df['genres'] = contents_df['genres'].apply(
+                lambda x: [g.strip() for g in x.split('|')] if isinstance(x, str) and x else []
+            )
+        pbr_app_state.contents_df = contents_df
+        logger.info(f"Contents 데이터 로드 완료: {len(contents_df)}개.")
 
-# 데이터 로드하고 전처리하여 반환
-def load_initial_data(data_path: str):
-    print(f"데이터를 '{data_path}'에서 로드 중입니다...")
+        # Reactions 데이터 로드 (이전 수정사항 그대로 유지, 잘 작동하는 부분)
+        result = db.execute(text("SELECT user_id, content_id, reaction, type FROM content_reactions"))
+        reactions_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.reactions_df = reactions_df
+        logger.info(f"Reactions 데이터 로드 완료: {len(reactions_df)}개.")
 
-    # 1. content_data.csv 파일 로드 및 전처리
-    contents_df = pd.read_csv(os.path.join(data_path, 'content_data.csv'))
-    contents_df_persona = contents_df[['id', 'title', 'genres']].copy()
-    contents_df_persona.rename(columns={'id': 'contentId'}, inplace=True)
-    contents_df_persona['genres'] = contents_df_persona['genres'].apply(map_genres_to_korean)
-    contents_df_persona['title_cleaned'] = contents_df_persona['title'].apply(clean_title)
+        # Reviews 데이터 로드 (이전 수정사항 그대로 유지, 잘 작동하는 부분)
+        result = db.execute(text("SELECT user_id, content_id, type, score FROM reviews"))
+        reviews_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.reviews_df = reviews_df
+        logger.info(f"Reviews 데이터 로드 완료: {len(reviews_df)}개.")
 
-    # 2. links.csv 로드 및 매핑 준비
-    links_df = pd.read_csv(os.path.join(data_path, 'links.csv'))
-    links_df.dropna(subset=['tmdbId'], inplace=True)
-    links_df['tmdbId'] = links_df['tmdbId'].astype(int)
+        # UserPersonas 데이터 로드 (변경 없음)
+        result = db.execute(text("SELECT * FROM user_personas"))
+        all_user_personas_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.all_user_personas_df = all_user_personas_df
+        logger.info(f"UserPersonas 데이터 로드 완료: {len(all_user_personas_df)}개.")
 
-    # 3. ratings.csv (별점 데이터) 로드 및 contentId 매핑
-    reviews_df = pd.read_csv(os.path.join(data_path, 'ratings.csv'))
-    reviews_df.rename(columns={'rating': 'score'}, inplace=True)
-    reviews_df = pd.merge(reviews_df, links_df[['movieId', 'tmdbId']], on='movieId', how='inner')
-    reviews_df.drop(columns=['movieId', 'timestamp'], inplace=True)
-    reviews_df.rename(columns={'tmdbId': 'contentId'}, inplace=True)
-    reviews_df = reviews_df[['userId', 'contentId', 'score']]
-    valid_content_ids_from_content_data = contents_df_persona['contentId'].unique()
-    reviews_df = reviews_df[reviews_df['contentId'].isin(valid_content_ids_from_content_data)].copy()
+        # Personas 데이터 로드 (변경 없음)
+        result = db.execute(text("SELECT * FROM personas"))
+        persona_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.persona_df = persona_df
+        logger.info(f"Personas 데이터 로드 완료: {len(persona_df)}개.")
 
+        # PersonaGenres 데이터 로드 (변경 없음)
+        result = db.execute(text("SELECT * FROM persona_genres"))
+        persona_genres_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.persona_genres_df = persona_genres_df
+        logger.info(f"personaGenres 데이터 로드 완료: {len(persona_genres_df)}개.")
 
-    # 4. content_reactions.csv (좋아요/싫어요 데이터) 로드 및 contentId 매핑
-    content_reactions_df_raw = pd.read_csv(os.path.join(data_path, 'content_reactions.csv'))
-    content_reactions_df_raw.rename(columns={'user_id': 'userId', 'content_id': 'contentId'}, inplace=True)
-    content_reactions_df_raw = content_reactions_df_raw[['userId', 'contentId', 'reaction']]
-
-    # content_reactions_df_raw에 있는 contentId가 movieId에 해당한다고 가정하고 links_df와 병합
-    temp_reactions_df_for_merge = content_reactions_df_raw.rename(columns={'contentId': 'movieId'})
-    content_reactions_df = pd.merge(temp_reactions_df_for_merge, links_df[['movieId', 'tmdbId']], on='movieId', how='inner')
-    content_reactions_df.drop(columns=['movieId'], inplace=True)
-    content_reactions_df.rename(columns={'tmdbId': 'contentId'}, inplace=True)
-    content_reactions_df = content_reactions_df[['userId', 'contentId', 'reaction']]
-    content_reactions_df = content_reactions_df[content_reactions_df['contentId'].isin(valid_content_ids_from_content_data)].copy()
-
-    # 5. 콘텐츠 유사도 매트릭스 생성 (장르 기반)
-    all_genres = sorted(list(set(genre for sublist in contents_df_persona['genres'] for genre in sublist)))
-    genre_matrix = pd.DataFrame(0, index=contents_df_persona['contentId'], columns=all_genres)
-    for index, row in contents_df_persona.iterrows():
-        content_id = row['contentId']
-        for genre in row['genres']:
-            if genre in genre_matrix.columns:
-                genre_matrix.loc[content_id, genre] = 1
-
-    content_similarity_matrix = cosine_similarity(genre_matrix)
-    content_similarity_df = pd.DataFrame(content_similarity_matrix,
-                                         index=contents_df_persona['contentId'],
-                                         columns=contents_df_persona['contentId'])
-
-    print("데이터 로딩 및 초기 전처리 완료.")
-    return contents_df_persona, content_similarity_df, reviews_df, content_reactions_df
-
-# 사용자 페르소나 데이터 로드
-def load_user_personas(user_data_path: str):
-    if os.path.exists(user_data_path):
-        print(f"'{user_data_path}'에서 사용자 페르소나를 로드 중입니다...")
+        # Genres 데이터 로드 (변경 없음)
+        result = db.execute(text("SELECT * FROM genres"))
+        genres_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.genres_df = genres_df
         
+        pbr_app_state.genre_id_to_name_map = pd.Series(genres_df.name.values, index=genres_df.id).to_dict()
+        pbr_app_state.genre_name_to_id_map = {v: k for k, v in pbr_app_state.genre_id_to_name_map.items()}
+        logger.info(f"Genres 데이터 로드 완료: {len(genres_df)}개.")
+
+        # PersonaOptions 데이터 로드 (변경 없음)
+        result = db.execute(text("SELECT * FROM persona_options"))
+        persona_options_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.persona_options_df = persona_options_df # 추가
+
+        # Options 데이터 로드 (변경 없음)
+        result = db.execute(text("SELECT * FROM options"))
+        options_df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.options_df = options_df # 추가
+        
+        logger.info(f"PersonaOptions 데이터 로드 완료: {len(persona_options_df)}개.")
+        logger.info(f"Options 데이터 로드 완료: {len(options_df)}개.")
+
+        pbr_app_state.user_qa_answers_df = pd.DataFrame(columns=['user_id', 'question_id', 'option_id', 'answer'])
+        logger.info("User QA Answers 데이터 로드 (빈 DataFrame으로 초기화) 완료.")
+
+        # ====================================================================
+        # 핵심 추가: 사용자 ID 및 콘텐츠 ID 매핑 생성 및 pbr_app_state에 저장
+        # ====================================================================
+        # 모든 고유 사용자 ID 수집
+        all_user_ids = pd.concat([pbr_app_state.reactions_df['user_id'], pbr_app_state.reviews_df['user_id']]).unique()
+        pbr_app_state.user_id_to_idx_map = {user_id: idx for idx, user_id in enumerate(all_user_ids)}
+        pbr_app_state.user_idx_to_id_map = {idx: user_id for user_id, idx in pbr_app_state.user_id_to_idx_map.items()}
+        pbr_app_state.all_user_ids = all_user_ids.tolist()
+        logger.info(f"사용자 매핑 완료: {len(all_user_ids)}명.")
+
+        # 모든 고유 콘텐츠 ID (original_id, type) 튜플 수집
+        # pbr_app_state.contents_df에서 contentId_orig를 content_id로 변경!
+        all_content_tuples = pbr_app_state.contents_df[['content_id', 'type']].drop_duplicates().apply(tuple, axis=1).tolist() # <<< 여기도 content_id로 변경!
+        pbr_app_state.content_id_to_idx_map = {content_tuple: idx for idx, content_tuple in enumerate(all_content_tuples)}
+        pbr_app_state.idx_to_content_id_map = {idx: content_tuple for content_tuple, idx in pbr_app_state.content_id_to_idx_map.items()}
+        logger.info(f"콘텐츠 매핑 완료: {len(all_content_tuples)}개.")
+
+
         try:
-            user_persona_df = pd.read_csv(user_data_path)
-            
-            # 'user_id' 컬럼을 숫자로 변환 시도, 오류 발생 시 NaN으로 처리
-            user_persona_df['user_id'] = pd.to_numeric(user_persona_df['user_id'], errors='coerce')
-            
-            # user_id가 NaN인 행(유효하지 않은 user_id)을 제거
-            initial_rows = len(user_persona_df)
-            user_persona_df.dropna(subset=['user_id'], inplace=True)
-            rows_after_dropna = len(user_persona_df)
+            # 3. Reactions 데이터 처리 (변경 없음)
+            reactions_df_processed = pbr_app_state.reactions_df.copy()
 
-            if initial_rows != rows_after_dropna:
-                print(f"[경고] '{user_data_path}'에서 유효하지 않은 'user_id'가 포함된 {initial_rows - rows_after_dropna}개의 행을 제거했습니다.")
-            
-            # 남은 'user_id'를 정수형으로 변환 (이제 NaN 없음 보장)
-            user_persona_df['user_id'] = user_persona_df['user_id'].astype(int)
+            reactions_df_processed['score'] = reactions_df_processed['reaction'].apply(
+                lambda x: LIKE_WEIGHT if x == 'LIKE' else (DISLIKE_WEIGHT if x == 'DISLIKE' else 0)
+            )
+            reactions_df_processed.rename(columns={'type': 'content_type'}, inplace=True)
+            reactions_df_processed = reactions_df_processed[['user_id', 'content_id', 'content_type', 'score']]
 
-            if not user_persona_df.empty:
-                print(f"{len(user_persona_df['user_id'].unique())}명의 고유 사용자 페르소나 데이터를 로드했습니다.")
+            # 2. Reviews 데이터 처리 (변경 없음)
+            reviews_df_processed = pbr_app_state.reviews_df.copy()
+            reviews_df_processed['score'] = reviews_df_processed['score'].apply(
+                lambda x: STAR_RATING_WEIGHTS.get(x, 0.0)
+            )
+            reviews_df_processed.rename(columns={'type': 'content_type'}, inplace=True)
+            reviews_df_processed = reviews_df_processed[['user_id', 'content_id', 'content_type', 'score']]
+
+            # 3. Reactions와 Reviews 데이터 통합 (변경 없음)
+            all_interactions_df = pd.concat([reactions_df_processed, reviews_df_processed], ignore_index=True)
+
+            # 4. 사용자 및 콘텐츠 인덱스 매핑 적용 (변경 없음)
+            all_interactions_df['user_idx'] = all_interactions_df['user_id'].map(pbr_app_state.user_id_to_idx_map)
+            
+            all_interactions_df['content_tuple'] = list(zip(all_interactions_df['content_id'], all_interactions_df['content_type']))
+            all_interactions_df['content_idx'] = all_interactions_df['content_tuple'].map(pbr_app_state.content_id_to_idx_map)
+
+            all_interactions_df.dropna(subset=['user_idx', 'content_idx', 'score'], inplace=True)
+            all_interactions_df['user_idx'] = all_interactions_df['user_idx'].astype(int)
+            all_interactions_df['content_idx'] = all_interactions_df['content_idx'].astype(int)
+
+            if not all_interactions_df.empty:
+                from scipy.sparse import csr_matrix
+                
+                user_count = len(pbr_app_state.user_id_to_idx_map)
+                content_count = len(pbr_app_state.content_id_to_idx_map)
+
+                pbr_app_state.user_item_matrix = csr_matrix(
+                    (
+                        all_interactions_df['score'],
+                        (all_interactions_df['user_idx'], all_interactions_df['content_idx'])
+                    ),
+                    shape=(user_count, content_count)
+                )
+                logger.info(f"CF 사용자-아이템 매트릭스 생성 완료. 형태: {pbr_app_state.user_item_matrix.shape}, 비0 요소: {pbr_app_state.user_item_matrix.nnz}개.")
             else:
-                print(f"[정보] '{user_data_path}' 파일이 비어 있거나 유효한 사용자 페르소나 데이터가 없습니다.")
-            
-            return user_persona_df
-            
+                pbr_app_state.user_item_matrix = None
+                logger.warning("사용자 상호작용 데이터(LIKE/DISLIKE/별점)가 없어 CF 사용자-아이템 매트릭스를 생성할 수 없습니다.")
         except Exception as e:
-            print(f"[오류] 사용자 페르소나 파일 '{user_data_path}' 로드 및 처리 중 오류 발생: {e}")
-            print("파일 내용을 확인하거나, 파일을 삭제하고 다시 시도해보세요.")
-            return pd.DataFrame(columns=['user_id', 'persona_id', 'score']) 
-    else:
-        print(f"[경고] 사용자 페르소나 파일 '{user_data_path}'를 찾을 수 없습니다. 빈 데이터프레임을 반환합니다.")
-        return pd.DataFrame(columns=['user_id', 'persona_id', 'score'])
+            pbr_app_state.user_item_matrix = None
+            logger.error(f"CF 사용자-아이템 매트릭스 생성 중 오류 발생: {e}", exc_info=True)
+
+        logger.info(f"CF 매트릭스 확인: user_item_matrix is None? {pbr_app_state.user_item_matrix is None}")
+        if pbr_app_state.user_item_matrix is not None:
+            logger.info(f"CF 매트릭스 형태: {pbr_app_state.user_item_matrix.shape}")
+            logger.info(f"CF 매트릭스 비어있는가?: {pbr_app_state.user_item_matrix.nnz == 0}")
+
+        logger.info(f"사용자 매핑 크기: {len(pbr_app_state.user_id_to_idx_map)}")
+        logger.info(f"콘텐츠 매핑 크기: {len(pbr_app_state.content_id_to_idx_map)}")
+
+        test_user_id = 44
+        if test_user_id in pbr_app_state.user_id_to_idx_map:
+            logger.info(f"사용자 ID {test_user_id} 매핑 인덱스: {pbr_app_state.user_id_to_idx_map[test_user_id]}")
+        else:
+            logger.info(f"사용자 ID {test_user_id} 매핑 존재하지 않음.")
+        # ====================================================================
 
 
-# 사용자 페르소나 데이터 csv 파일로 저장
-def save_user_personas(user_persona_df, user_data_path: str):
-    if not user_persona_df.empty:
-        os.makedirs(os.path.dirname(user_data_path), exist_ok=True)
-        user_persona_df.to_csv(user_data_path, index=False)
-        print(f"사용자 페르소나 데이터가 '{user_data_path}'에 저장되었습니다.")
-    else:
-        print("[경고] 사용자 페르소나 데이터프레임이 비어 있어 저장하지 않습니다.")
+        # 페르소나 상세 정보 맵 생성 (변경 없음)
+        pbr_app_state.persona_id_to_name_map = pd.Series(persona_df.name.values, index=persona_df.persona_id).to_dict()
+        pbr_app_state.persona_name_to_id_map = {v: k for k, v in pbr_app_state.persona_id_to_name_map.items()}
+
+        if pbr_app_state.persona_details_map is None:
+            pbr_app_state.persona_details_map = {}
+
+        for _, row in persona_df.iterrows():
+            persona_id = row['persona_id']
+            persona_name = row['name']
+            description = row['description']
+
+            keywords = []
+            persona_relevant_genres = persona_genres_df[persona_genres_df['persona_id'] == persona_id]
+            for _, genre_row in persona_relevant_genres.iterrows():
+                genre_id = genre_row['genre_id']
+                genre_name = pbr_app_state.genre_id_to_name_map.get(genre_id) 
+                if genre_name:
+                    keywords.append(genre_name)
+
+            qa_mapping = {}
+            persona_qa_options = persona_options_df[persona_options_df['persona_id'] == persona_id]
+            merged_qa_data = pd.merge(persona_qa_options, options_df, on=['question_id', 'option_id'], how='left')
+
+            if not merged_qa_data.empty:
+                for q_id in merged_qa_data['question_id'].unique():
+                    q_data = merged_qa_data[merged_qa_data['question_id'] == q_id]
+                    if not q_data.empty:
+                        best_option_row = q_data.loc[q_data['score'].idxmax()]
+                        qa_mapping[str(q_id)] = str(best_option_row['content'])
+
+            pbr_app_state.persona_details_map[persona_id] = {
+                'persona_name': persona_name,
+                'description': description,
+                'keywords': keywords,
+                'qa_mapping': qa_mapping
+            }
+
+        logging.info("모든 데이터 로드 및 pbr_app_state 업데이트 완료.")
+
+        print(pbr_app_state.persona_details_map.get(4, {}).get('persona_name'))
+        print(pbr_app_state.persona_details_map.get(4, {}).get('keywords'))
+
+    except Exception as e:
+        logging.error(f"데이터 로드 중 오류 발생: {e}", exc_info=True)
+        raise
+
+    finally:
+        db.close()

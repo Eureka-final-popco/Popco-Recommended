@@ -1,545 +1,1087 @@
+import logging
 import pandas as pd
-from typing import List, Dict, Any, Tuple, Optional
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, lil_matrix
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import itertools
 from collections import defaultdict
+from typing import Dict, List, Any, Tuple, Optional, Set
+from datetime import datetime
+from collections import defaultdict
+
+from sqlalchemy.orm import Session
+from sqlalchemy import func, text
+
+# 내부 모듈 임포트
+from .state import pbr_app_state
 from .config import (
-    LIKE_WEIGHT,
-    DISLIKE_WEIGHT,
-    STAR_RATING_WEIGHTS,
-    POSITIVE_FEEDBACK_THRESHOLD,
-    QA_WEIGHT,
-    CONTENT_FEEDBACK_WEIGHT,
-    MIN_FEEDBACK_FOR_PERSONA_DETERMINATION,
-    MIN_POSITIVE_RATINGS_FOR_GROWTH,
+    LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS,
+    PERSONA_SIMILARITY_THRESHOLD, CONTENT_SIMILARITY_THRESHOLD,
+    TOP_N_CONTENTS_FOR_POPULAR_PER_PERSONA,
+    RECOMMENDATION_CACHE_EXPIRATION_SECONDS,
     CF_SIMILARITY_THRESHOLD,
-    PENALTY_FOR_NO_PERSONA_MATCH,
-    default_personas,
-    content_genre_keywords_mapping
+    QA_WEIGHT, CONTENT_FEEDBACK_WEIGHT, MIN_FEEDBACK_FOR_PERSONA_DETERMINATION,
+    MIN_POSITIVE_RATINGS_FOR_GROWTH, PENALTY_FOR_NO_PERSONA_MATCH,
+    MIN_VOTE_COUNT_FOR_POPULARITY, QA_INITIAL_RECOMMENDATION_THRESHOLD,
+    MAX_EXPECTED_PERSONA_SCORE, MIN_PERSONA_SCORE, BABY_PERSONA_THRESHOLD,
+    POSITIVE_FEEDBACK_THRESHOLD, RECOMMENDATION_COUNT
 )
+from .schemas import RecommendedContent
+from app.models import UserPersona, ContentReaction, Review, Persona, ReactionType # Persona 모델 임포트 필요
+
+# 로거 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
-GLOBAL_USER_ID_TO_IDX: Dict[int, int] = {}
-GLOBAL_USER_IDX_TO_ID: Dict[int, int] = {}
-GLOBAL_CONTENT_ID_TO_IDX: Dict[int, int] = {}
-GLOBAL_CONTENT_IDX_TO_ID: Dict[int, int] = {}
+def _get_contents_info(content_ids: List[int]) -> List[Dict]:
+    """
+    주어진 content_ids에 해당하는 콘텐츠 정보를 pbr_app_state.contents_df에서 조회합니다.
+    pbr_app_state.contents_df에는 'id', 'title', 'genres', 'type', 'poster_path' 컬럼이 있다고 가정합니다.
+    """
+    if pbr_app_state.contents_df is None or pbr_app_state.contents_df.empty:
+        logger.warning("contents_df가 로드되지 않았거나 비어 있습니다. 콘텐츠 정보를 가져올 수 없습니다.")
+        return []
 
+    contents_info_df = pbr_app_state.contents_df[pbr_app_state.contents_df['content_id'].isin(content_ids)]
 
-def _get_user_idx_from_id(user_id: int) -> int:
-    return user_id
+    results = []
+    for _, row in contents_info_df.iterrows():
+        genres_data = row.get('genres') # 'genres' 컬럼의 원본 값을 가져옵니다.
+        genres_list = []
 
-def _get_user_id_from_idx(idx: int) -> int:
-    return idx
-
-def _get_content_idx_from_id(content_id: int) -> int:
-    return content_id
-
-def _get_content_id_from_idx(idx: int) -> int:
-    return idx
-
-
-# 사용자 통합 피드백 생성 함수
-def generate_unified_user_feedback(
-    user_id: int,
-    reactions_df: pd.DataFrame,
-    reviews_df: pd.DataFrame,
-    contents_df: pd.DataFrame
-) -> Dict[int, float]:
-    user_reactions = reactions_df[reactions_df['userId'] == user_id]
-    user_reviews = reviews_df[reviews_df['userId'] == user_id]
-
-    unified_feedback = {}
-
-    if 'updated_at' in user_reactions.columns:
-        user_reactions = user_reactions.sort_values(by='updated_at', ascending=True)
-    elif 'created_at' in user_reactions.columns:
-        user_reactions = user_reactions.sort_values(by='created_at', ascending=True)
-    
-    if 'updated_at' in user_reviews.columns:
-        user_reviews = user_reviews.sort_values(by='updated_at', ascending=True)
-    elif 'created_at' in user_reviews.columns:
-        user_reviews = user_reviews.sort_values(by='created_at', ascending=True)
-
-    # 1. 좋아요/싫어요 처리 (가장 최근 피드백만 반영)
-    for _, row in user_reactions.iterrows():
-        content_id = row['contentId']
-        reaction_type = row['reaction']
+        # genres_data가 이미 리스트인 경우 바로 사용
+        if isinstance(genres_data, list):
+            genres_list = [g.strip() for g in genres_data if isinstance(g, str) and g.strip()]
+        # genres_data가 문자열인 경우 파싱 (이 경우는 data_loader에서 이미 처리되었으므로 거의 발생하지 않을 것임)
+        elif isinstance(genres_data, str) and genres_data.strip():
+            if ',' in genres_data:
+                genres_list = [genre.strip() for genre in genres_data.split(',') if genre.strip()]
+            elif '|' in genres_data:
+                genres_list = [g.strip() for g in genres_data.split('|') if g.strip()]
+            else:
+                genres_list = [genres_data.strip()] # 단일 장르
         
-        if reaction_type == '좋아요':
-            unified_feedback[content_id] = LIKE_WEIGHT
-        elif reaction_type == '싫어요':
-            unified_feedback[content_id] = DISLIKE_WEIGHT
+        results.append({
+            "contentId": int(row['content_id']), # Pydantic 모델에 맞게 int로 변환
+            "title": row.get('title', ''), # get()으로 기본값 지정, None 방지
+            "genres": genres_list,
+            "type": row.get('type', ''),
+            "poster_path": row.get('poster_path', ''),
+            # 필요하다면 다른 필드도 여기에 추가할 수 있습니다.
+            # 예: "rating_average": row.get('rating_average'),
+            #     "rating_count": row.get('rating_count')
+        })
+    return results
 
-    # 2. 리뷰 (별점) 처리
-    for _, row in user_reviews.iterrows():
-        content_id = row['contentId']
-        score = row['score']
-        rating_weight = STAR_RATING_WEIGHTS.get(score, 0.0) 
-        unified_feedback[content_id] = rating_weight 
-
-    return unified_feedback
-
-# 초기 사용자 페르소나 생성/업데이트 함수
-def generate_initial_user_personas(
-    user_ids: List[int],
-    reactions_df: pd.DataFrame,
-    reviews_df: pd.DataFrame,
-    contents_df: pd.DataFrame,
-    default_personas: Dict[str, Dict[str, Any]],
-    content_genre_keywords_mapping: Dict[str, List[str]],
-    initial_answers: Optional[Dict[str, str]] = None
-) -> pd.DataFrame:
-    all_user_personas_data = []
-
-    for user_id in user_ids:
-        # 1. 사용자 통합 피드백 생성
-        unified_feedback = generate_unified_user_feedback(user_id, reactions_df, reviews_df, contents_df)
-
-        # 2. 페르소나별 점수 계산
-        persona_raw_scores = {persona_id: 0 for persona_id in default_personas.keys()} 
-        
-        # 긍정적 피드백 수
-        positive_feedback_count = sum(1 for score in unified_feedback.values() if score >= POSITIVE_FEEDBACK_THRESHOLD)
-
-        # 초기 답변이 없거나 긍정적 피드백 수가 MIN_POSITIVE_RATINGS_FOR_GROWTH 미달 시 페르소나 추정 안 함
-        if not initial_answers and positive_feedback_count < MIN_POSITIVE_RATINGS_FOR_GROWTH:
-            for persona_id in default_personas.keys():
-                all_user_personas_data.append({
-                    'user_id': user_id,
-                    'persona_id': persona_id,
-                    'score': 0.0 
-                })
-            continue 
-
-        # 2.1. 초기 설문 답변 기반 점수
-        if initial_answers:
-            for persona_id, persona_data in default_personas.items():
-                for question_id, expected_answer in persona_data.get('qa_mapping', {}).items():
-                    if initial_answers.get(question_id) == expected_answer:
-                        persona_raw_scores[persona_id] += 1 
-
-        # 2.2. 콘텐츠 피드백 기반 점수
-        positive_feedback_contents_ids = [cid for cid, score in unified_feedback.items() if score >= POSITIVE_FEEDBACK_THRESHOLD]
-
-        if positive_feedback_contents_ids: 
-            for content_id in positive_feedback_contents_ids:
-                content_info_row = contents_df[contents_df['contentId'] == content_id]
-
-                if not content_info_row.empty:
-                    content_genres_data = content_info_row['genres'].iloc[0]
-
-                    if isinstance(content_genres_data, str):
-                        content_genres = [g.strip() for g in content_genres_data.split('|')]
-                    elif isinstance(content_genres_data, list):
-                        content_genres = [g.strip() for g in content_genres_data]
-                    else:
-                        content_genres = []
-                else:
-                    content_genres = []
-
-                for persona_id, persona_data in default_personas.items():
-                    persona_keywords = persona_data.get('keywords', [])
-
-                    persona_actual_genres = set()
-                    for keyword in persona_keywords:
-                        if keyword in content_genre_keywords_mapping:
-                            persona_actual_genres.update(content_genre_keywords_mapping[keyword])
-                        else:
-                            persona_actual_genres.add(keyword)
-
-                    match_count = len(set(content_genres).intersection(persona_actual_genres))
-                    if match_count > 0:
-                        persona_raw_scores[persona_id] += match_count 
-
-        # 3. 가중치 적용 및 최종 페르소나 점수 정규화
-        final_persona_scores = {}
-        
-        max_qa_score_possible = sum(len(p.get('qa_mapping', {})) for p in default_personas.values()) if initial_answers else 0
-        
-        max_content_score_possible = 0
-        if positive_feedback_contents_ids:
-            for content_id in positive_feedback_contents_ids:
-                content_info_row = contents_df[contents_df['contentId'] == content_id]
-                if not content_info_row.empty:
-                    content_genres_data = content_info_row['genres'].iloc[0]
-                    content_genres_set = set()
-                    if isinstance(content_genres_data, str):
-                        content_genres_set = set([g.strip() for g in content_genres_data.split('|')])
-                    elif isinstance(content_genres_data, list):
-                        content_genres_set = set([g.strip() for g in content_genres_data])
-
-                    max_match_for_content = 0
-                    for persona_data in default_personas.values():
-                        persona_keywords = persona_data.get('keywords', [])
-                        persona_actual_genres_set = set()
-                        for keyword in persona_keywords:
-                            if keyword in content_genre_keywords_mapping:
-                                persona_actual_genres_set.update(content_genre_keywords_mapping[keyword])
-                            else:
-                                persona_actual_genres_set.add(keyword)
-                        match_count = len(content_genres_set.intersection(persona_actual_genres_set))
-                        max_match_for_content = max(max_match_for_content, match_count)
-                    max_content_score_possible += max_match_for_content
-
-
-        for persona_id, raw_score in persona_raw_scores.items():
-            qa_normalized_score = 0
-            if initial_answers and max_qa_score_possible > 0:
-                qa_matches_for_persona = sum(1 for qid, ans in default_personas[persona_id].get('qa_mapping', {}).items() if initial_answers.get(qid) == ans)
-                qa_normalized_score = (qa_matches_for_persona / max_qa_score_possible)
-
-            content_normalized_score = 0
-            if positive_feedback_contents_ids and max_content_score_possible > 0:
-                content_normalized_score = (raw_score / max_content_score_possible) 
-                
-            final_score_for_persona = (qa_normalized_score * QA_WEIGHT) + (content_normalized_score * CONTENT_FEEDBACK_WEIGHT)
-            final_persona_scores[persona_id] = final_score_for_persona
-
-        # 모든 점수가 0인 경우 (피드백이 너무 적거나 매칭이 안되는 경우)
-        if not any(final_persona_scores.values()):
-            num_personas = len(default_personas)
-            final_persona_scores = {p_id: 1.0 / num_personas for p_id in default_personas.keys()} # 균등 배분
-        else:
-            sum_of_final_scores = sum(final_persona_scores.values())
-            if sum_of_final_scores > 0:
-                final_persona_scores = {p_id: score / sum_of_final_scores for p_id, score in final_persona_scores.items()}
-            else:
-                num_personas = len(default_personas)
-                final_persona_scores = {p_id: 1.0 / num_personas for p_id in default_personas.keys()}
-
-        # 결과 데이터프레임에 추가
-        for persona_id, score in final_persona_scores.items():
-            all_user_personas_data.append({
-                'user_id': user_id,
-                'persona_id': persona_id,
-                'score': score
-            })
-
-    return pd.DataFrame(all_user_personas_data)
-
-
-# 하이브리드 페르소나 결정
-def get_hybrid_persona(
-    user_id: int,
-    all_user_personas_df: pd.DataFrame,
-    unified_user_feedback: Dict[int, float], 
-    contents_df: pd.DataFrame, 
-    default_personas: Dict[str, Dict[str, Any]],
-    content_genre_keywords_mapping: Dict[str, List[str]]
-) -> Tuple[str, str, Dict[str, float]]:
-    user_persona_data = all_user_personas_df[all_user_personas_df['user_id'] == user_id]
-
-    if user_persona_data.empty:
-        return "알 수 없음", "알 수 없음", {}
-
-    sorted_personas_by_score = sorted(user_persona_data.set_index('persona_id')['score'].to_dict().items(),
-                                      key=lambda item: item[1], reverse=True)
-
-    main_persona_id = "알 수 없음"
-    sub_persona_id = "알 수 없음"
-    all_personas_scores = dict(sorted_personas_by_score)
-
-    if not sorted_personas_by_score or sorted_personas_by_score[0][1] <= 0:
-        return "알 수 없음", "알 수 없음", all_personas_scores
-
-    main_score = sorted_personas_by_score[0][1]
-    top_score_personas = [item for item in sorted_personas_by_score if item[1] == main_score]
-
-    if len(top_score_personas) > 1:
-        highest_rated_content_id = None
-        max_feedback_score = -float('inf')
-
-        positive_feedback_contents = {
-            cid: score for cid, score in unified_user_feedback.items()
-            if score >= POSITIVE_FEEDBACK_THRESHOLD
-        }
-
-        if not positive_feedback_contents:
-            top_score_personas.sort(key=lambda item: item[0])
-            main_persona_id = top_score_personas[0][0]
-            if len(top_score_personas) > 1:
-                sub_persona_id = top_score_personas[1][0]
-            else:
-                sub_persona_id = "없음"
-            return main_persona_id, sub_persona_id, all_personas_scores
-
-        for content_id, score in positive_feedback_contents.items():
-            if score > max_feedback_score:
-                max_feedback_score = score
-                highest_rated_content_id = content_id
-            elif score == max_feedback_score and highest_rated_content_id is not None and content_id < highest_rated_content_id:
-                highest_rated_content_id = content_id
-
-        if highest_rated_content_id is not None:
-            content_info_row = contents_df[contents_df['contentId'] == highest_rated_content_id]
-            if not content_info_row.empty:
-                best_content_genres_data = content_info_row['genres'].iloc[0]
-
-                if isinstance(best_content_genres_data, str):
-                    best_content_genres = [g.strip() for g in best_content_genres_data.split('|')]
-                elif isinstance(best_content_genres_data, list):
-                    best_content_genres = [g.strip() for g in best_content_genres_data]
-                else:
-                    best_content_genres = []
-            else:
-                best_content_genres = []
-
-            persona_match_counts = {}
-            for persona_id, _ in top_score_personas:
-                persona_data = default_personas[persona_id]
-                persona_keywords = persona_data.get('keywords', [])
-
-                persona_actual_genres_set = set()
-                for keyword in persona_keywords:
-                    if keyword in content_genre_keywords_mapping:
-                        persona_actual_genres_set.update(content_genre_keywords_mapping[keyword])
-                    else:
-                        persona_actual_genres_set.add(keyword)
-
-                match_count = len(set(best_content_genres).intersection(persona_actual_genres_set))
-                persona_match_counts[persona_id] = match_count
-
-            sorted_by_match = sorted(persona_match_counts.items(), key=lambda item: (-item[1], item[0]))
-            main_persona_id = sorted_by_match[0][0]
-
-            if len(sorted_by_match) > 1:
-                sub_persona_id = sorted_by_match[1][0]
-            else:
-                sub_persona_id = "없음"
-
-        else: 
-            top_score_personas.sort(key=lambda item: item[0])
-            main_persona_id = top_score_personas[0][0]
-            if len(top_score_personas) > 1:
-                sub_persona_id = top_score_personas[1][0]
-            else:
-                sub_persona_id = "없음"
-    else: 
-        main_persona_id = top_score_personas[0][0]
-        if len(sorted_personas_by_score) > 1:
-            sub_persona_id = sorted_personas_by_score[1][0]
-        else:
-            sub_persona_id = "없음"
-
-    user_total_feedback_count = len(unified_user_feedback)
-    if user_total_feedback_count < MIN_FEEDBACK_FOR_PERSONA_DETERMINATION:
-        main_persona_name_with_prefix = f"아기_{main_persona_id}" 
+def _create_recommended_content(
+    content_id: int,
+    predicted_rating: Optional[float] = None,
+    persona_genre_match: Optional[float] = None) -> RecommendedContent:
+    """
+    contentId를 기반으로 RecommendedContent 객체를 생성하고, pbr_app_state.contents_df에서 추가 정보를 채웁니다.
+    """
+    content_info = _get_contents_info([content_id])
+    if content_info:
+        info = content_info[0]
+        return RecommendedContent(
+            contentId=content_id,
+            title=info.get('title'),
+            genres=info.get('genres', []),
+            type=info.get('type'),
+            poster_path=info.get('poster_path'),
+            predicted_rating=predicted_rating,
+            persona_genre_match=persona_genre_match
+        )
     else:
-        main_persona_name_with_prefix = main_persona_id
+        # 정보가 없는 경우 기본값으로 채운 RecommendedContent 반환 (Null 값 방지)
+        return RecommendedContent(
+            contentId=content_id,
+            title=str(content_id), # contentId로 대체
+            genres=[],
+            type=None,
+            poster_path=None,
+            predicted_rating=predicted_rating,
+            persona_genre_match=persona_genre_match
+        )
 
-    return main_persona_name_with_prefix, sub_persona_id, all_personas_scores
-
-
-# 사용자 - 콘텐츠 행렬 생성 (희소 행렬 버전)
 def calculate_user_content_matrix_sparse(
     reactions_df: pd.DataFrame,
     reviews_df: pd.DataFrame,
-    contents_df: pd.DataFrame 
+    user_id_to_idx_map: Dict[int, int],
+    content_id_to_idx_map: Dict[Tuple[int, str], int]
 ) -> csr_matrix:
-    all_user_ids = pd.concat([reactions_df['userId'], reviews_df['userId']]).unique()
-    all_content_ids = pd.concat([reactions_df['contentId'], reviews_df['contentId']]).unique()
+    logger.info("사용자-콘텐츠 희소 행렬 계산 시작...")
 
-    if all_user_ids.size == 0 or all_content_ids.size == 0:
-        return csr_matrix((0, 0), dtype=np.float64)
+    num_users = len(user_id_to_idx_map)
+    num_contents = len(content_id_to_idx_map)
 
-    max_user_id = all_user_ids.max()
-    max_content_id = all_content_ids.max()
+    # LIL(List of Lists) 형식의 희소 행렬을 생성합니다. 행렬 원소 추가에 효율적입니다.
+    user_item_matrix = lil_matrix((num_users, num_contents))
 
-    num_users = int(max_user_id) + 1
-    num_contents = int(max_content_id) + 1
+    # Reactions 데이터 처리
+    for _, row in reactions_df.iterrows():
+        user_id = row['user_id']
+        content_id_orig = row['content_id']
+        content_type = row['type']
+        reaction_type = row['reaction_type']
 
-    rows = []
-    cols = []
-    data = []
+        user_idx = user_id_to_idx_map.get(user_id)
+        content_tuple = (content_id_orig, content_type)
+        content_idx = content_id_to_idx_map.get(content_tuple)
 
-    unique_users_in_feedback = pd.concat([reactions_df['userId'], reviews_df['userId']]).unique()
-
-    for user_id in unique_users_in_feedback:
-        unified_feedback_for_user = generate_unified_user_feedback(user_id, reactions_df, reviews_df, contents_df)
-        for content_id, score in unified_feedback_for_user.items():
-            rows.append(user_id)
-            cols.append(content_id)
-            data.append(score)
-
-    user_content_matrix = csr_matrix((data, (rows, cols)), shape=(num_users, num_contents), dtype=np.float64)
-
-    return user_content_matrix
-
-# 사용자 유사도 계산
-def calculate_user_similarity(user_content_matrix: csr_matrix) -> pd.DataFrame:
-    if user_content_matrix.shape[0] < 2 or user_content_matrix.shape[1] < 1:
-        print("경고: 유사도 계산을 위한 충분한 사용자 또는 콘텐츠 데이터가 없습니다.")
-        return pd.DataFrame()
-
-    user_similarity = cosine_similarity(user_content_matrix)
-    user_similarity_df = pd.DataFrame(user_similarity)
-
-    np.fill_diagonal(user_similarity_df.values, 0)
-
-    user_ids = [_get_user_id_from_idx(i) for i in range(user_content_matrix.shape[0])]
-    user_similarity_df.index = user_ids
-    user_similarity_df.columns = user_ids
-
-    return user_similarity_df
-
-# 협업 필터링 기반 콘텐츠 추천
-def recommend_contents_cf(
-    target_user_id: int,
-    user_content_matrix: csr_matrix,
-    user_similarity_df: pd.DataFrame,
-    contents_df_persona: pd.DataFrame,
-    all_user_personas_df: pd.DataFrame,
-    reactions_df: pd.DataFrame,
-    reviews_df: pd.DataFrame,
-    num_recommendations: int = 10
-) -> List[Dict[str, Any]]:
-    target_user_idx = target_user_id
-
-    if target_user_idx >= user_content_matrix.shape[0]:
-        print(f"경고: 타겟 사용자 ID {target_user_id}에 대한 행렬 범위 정보가 부족합니다. 사용자 ID가 행렬의 최대 인덱스를 초과합니다.")
-        return []
-
-    if target_user_id not in user_similarity_df.index:
-        print(f"경고: 사용자 {target_user_id}에 대한 유사도 데이터가 없습니다.")
-        return []
-
-    # 1. 대상 사용자의 메인 페르소나 식별
-    unified_feedback_for_target_user = generate_unified_user_feedback(
-        target_user_id, reactions_df, reviews_df, contents_df_persona
-    )
-    main_persona_name_with_prefix, _, all_persona_scores_dict = get_hybrid_persona(
-        target_user_id,
-        all_user_personas_df,
-        unified_feedback_for_target_user,
-        contents_df_persona,
-        default_personas,
-        content_genre_keywords_mapping
-    )
-    
-    main_persona_pure_id = main_persona_name_with_prefix.replace("아기_", "")
-
-    if main_persona_name_with_prefix == "알 수 없음":
-        print(f"사용자 {target_user_id}의 메인 페르소나를 식별할 수 없습니다. 일반 추천을 시도하거나 다른 방식으로 폴백하세요.")
-        return []
-
-    print(f"사용자 {target_user_id}'의 메인 페르소나: {main_persona_name_with_prefix} (순수: {main_persona_pure_id})")
-
-    # 2. 해당 메인 페르소나에 속하는 사용자들 필터링
-    main_persona_for_each_user = all_user_personas_df.loc[
-        all_user_personas_df.groupby('user_id')['score'].idxmax()
-    ].copy() 
-
-    relevant_persona_users_df = main_persona_for_each_user[
-        main_persona_for_each_user['persona_id'].str.contains(main_persona_pure_id)
-    ]
-    
-    persona_group_user_ids = relevant_persona_users_df['user_id'].tolist()
-    
-    if target_user_id not in persona_group_user_ids:
-        persona_group_user_ids.append(target_user_id)
-    
-    persona_group_user_ids_in_similarity_df = [
-        uid for uid in persona_group_user_ids if uid in user_similarity_df.index
-    ]
-    
-    if len(persona_group_user_ids_in_similarity_df) < 2:
-        print(f"경고: {main_persona_name_with_prefix} 페르소나 그룹 내에 유사도 계산을 위한 충분한 사용자(2명 이상)가 없습니다.")
-        return []
-
-    # 3. 페르소나 그룹 내에서 타겟 사용자와 유사한 사용자 찾기
-    similarities_with_group = user_similarity_df.loc[target_user_id, persona_group_user_ids_in_similarity_df]
-    
-    if target_user_id in similarities_with_group.index:
-        similarities_with_group = similarities_with_group.drop(target_user_id)
-
-    # CF_SIMILARITY_THRESHOLD를 넘는 유사도를 가진 사용자만 선택
-    top_similar_users = similarities_with_group[similarities_with_group >= CF_SIMILARITY_THRESHOLD].sort_values(ascending=False)
-    
-    if top_similar_users.empty:
-        print(f"경고: {main_persona_name_with_prefix} 그룹에서 사용자 {target_user_id}와 유사도 임계값({CF_SIMILARITY_THRESHOLD})을 넘는 사용자를 찾을 수 없습니다.")
-        return []
+        if user_idx is not None and content_idx is not None:
+            # 'liked'에 가중치 1, 'disliked'에 가중치 -1 부여 (예시)
+            # 필요에 따라 가중치 조정 또는 다른 방식으로 점수화 가능
+            score = 0
+            if reaction_type == 'liked':
+                score = 1
+            elif reaction_type == 'disliked':
+                score = -1
             
-    selected_similar_user_ids = top_similar_users.index.tolist()
+            # 이미 값이 있으면 합산 (예: 같은 콘텐츠에 대해 반응과 리뷰가 모두 있는 경우)
+            user_item_matrix[user_idx, content_idx] += score
 
-    # 4. 유사 사용자들이 선호하는 콘텐츠 찾기 및 가중 평점 계산
-    predicted_ratings = defaultdict(float) 
+    # Reviews 데이터 처리
+    for _, row in reviews_df.iterrows():
+        user_id = row['user_id']
+        content_id_orig = row['content_id'] # reviews_df에서는 'content_id' 컬럼 사용
+        content_type = row['content_type'] # reviews_df에서는 'content_type' 컬럼 사용
+        rating = row['rating']
 
-    watched_content_ids = set(unified_feedback_for_target_user.keys())
+        user_idx = user_id_to_idx_map.get(user_id)
+        content_tuple = (content_id_orig, content_type)
+        content_idx = content_id_to_idx_map.get(content_tuple)
 
-    for similar_user_id in selected_similar_user_ids:
-        similarity_score = top_similar_users.loc[similar_user_id] 
+        if user_idx is not None and content_idx is not None:
+            # 리뷰 평점을 그대로 사용하거나 스케일링하여 사용
+            user_item_matrix[user_idx, content_idx] += rating # 또는 rating / MAX_RATING 등으로 정규화
 
-        sim_user_ratings_row = user_content_matrix[similar_user_id, :]
-        rated_content_indices, rated_content_scores = sim_user_ratings_row.nonzero()[1], sim_user_ratings_row.data
-        
-        for i, content_idx in enumerate(rated_content_indices):
-            content_id = _get_content_id_from_idx(content_idx)
-            
-            if content_id not in watched_content_ids:
-                rating_by_similar_user = rated_content_scores[i]
-                predicted_ratings[content_id] += similarity_score * rating_by_similar_user
-    
-    # 5. 정규화 
-    sum_of_similarities = top_similar_users.sum()
-    if sum_of_similarities == 0:
-        predicted_ratings_normalized = {}
-    else:
-        predicted_ratings_normalized = {
-            content_id: score / sum_of_similarities
-            for content_id, score in predicted_ratings.items()
-        }
+    # CSR(Compressed Sparse Row) 형식으로 변환하여 효율적인 계산을 준비
+    user_item_matrix_csr = user_item_matrix.tocsr()
+    logger.info(f"사용자-콘텐츠 희소 행렬 계산 완료. Shape: {user_item_matrix_csr.shape}")
+    return user_item_matrix_csr
 
-    # 6. 페르소나 장르 매칭을 통한 추가 보정 및 최종 추천 목록 생성
-    final_recommendations_with_scores = []
-    
-    # 현재 사용자의 메인 페르소나의 장르 키워드 가져오기
-    main_persona_genres_keywords = set()
-    if main_persona_pure_id in default_personas:
-        main_persona_genres_keywords.update(default_personas[main_persona_pure_id].get('keywords', []))
-    
-    main_persona_actual_genres = set()
-    for keyword in main_persona_genres_keywords:
-        if keyword in content_genre_keywords_mapping:
-            main_persona_actual_genres.update(content_genre_keywords_mapping[keyword])
+def calculate_and_store_user_personas(
+    db: Session,
+    user_id: int,
+    calculated_persona_scores: Dict[int, float]
+):
+    """
+    계산된 사용자 페르소나 점수를 user_personas 테이블에 저장하거나 업데이트합니다.
+    """
+    logger.info(f"사용자 [{user_id}]의 페르소나 점수 DB 및 상태 저장 시작.")
+
+    if not calculated_persona_scores:
+        logger.warning(f"사용자 {user_id}에 대해 저장할 페르소나 점수가 없습니다.")
+        return
+
+    # 기존 UserPersona 기록 삭제 (새로운 점수로 덮어쓰기 위해)
+    db.query(UserPersona).filter(UserPersona.user_id == user_id).delete(synchronize_session=False)
+    logger.info(f"사용자 {user_id}의 기존 페르소나 점수 {db.query(UserPersona).filter(UserPersona.user_id == user_id).count()}개 삭제 완료.")
+
+    new_user_personas = []
+    for persona_id, score in calculated_persona_scores.items():
+        persona = db.query(Persona).filter(Persona.persona_id == persona_id).first()
+        if persona:
+            new_user_personas.append(
+                UserPersona(
+                    user_id=user_id,
+                    persona_id=persona_id,
+                    score=score
+                )
+            )
         else:
-            main_persona_actual_genres.add(keyword)
+            logger.warning(f"페르소나 ID {persona_id}를 찾을 수 없습니다. 해당 페르소나 점수는 저장되지 않습니다.")
 
-    sorted_recommendations = sorted(predicted_ratings_normalized.items(), key=lambda item: item[1], reverse=True)
+    if new_user_personas:
+        db.add_all(new_user_personas)
+        logger.info(f"사용자 {user_id}의 새로운 페르소나 점수 {len(new_user_personas)}개 추가됨.")
+    else:
+        logger.warning(f"사용자 {user_id}에 대해 저장할 유효한 새로운 페르소나 점수가 없습니다.")
 
-    for content_id, predicted_rating in sorted_recommendations:
-        if len(final_recommendations_with_scores) >= num_recommendations:
-            break
 
-        content_details = contents_df_persona[contents_df_persona['contentId'] == content_id]
-        
-        if not content_details.empty:
-            content_row = content_details.iloc[0]
-            
-            content_genres_data = content_row['genres']
-            if isinstance(content_genres_data, str):
-                content_genres = [g.strip() for g in content_genres_data.split('|')]
-            elif isinstance(content_genres_data, list):
-                content_genres = [g.strip() for g in content_genres_data]
-            else:
-                content_genres = []
+def calculate_user_similarity(user_item_matrix: csr_matrix, user_idx_to_id_map: Dict[int, int]) -> Tuple[pd.DataFrame, csr_matrix]:
+    logger.info("사용자 유사도 계산 시작...")
+    if user_item_matrix.shape[0] == 0:
+        logger.warning("user_item_matrix가 비어 있어 사용자 유사도를 계산할 수 없습니다.")
+        # 빈 데이터프레임과 빈 희소 행렬 반환
+        return pd.DataFrame(columns=['user1_idx', 'user2_idx', 'similarity_score']), csr_matrix((0,0))
 
-            persona_genre_match = bool(set(content_genres).intersection(main_persona_actual_genres))
-            
-            # 페르소나 장르 불일치 시 페널티 적용
-            final_score = predicted_rating
-            if not persona_genre_match:
-                final_score += PENALTY_FOR_NO_PERSONA_MATCH
+    # 사용자-사용자 코사인 유사도 계산
+    user_similarity_matrix = cosine_similarity(user_item_matrix)
+    logger.info(f"user_similarity_matrix shape: {user_similarity_matrix.shape}")
 
-            final_recommendations_with_scores.append({
-                "contentId": int(content_id),
-                "title": content_row['title'],
-                "genres": content_genres,
-                "predicted_rating": float(final_score),
-                "persona_genre_match": persona_genre_match
-            })
-        
-    final_recommendations_with_scores.sort(key=lambda x: x['predicted_rating'], reverse=True)
+    # 유사도 결과를 DataFrame으로 변환
+    similarity_data = []
+    num_users = user_item_matrix.shape[0]
+    for i in range(num_users):
+        for j in range(i + 1, num_users): # 중복 계산 방지 및 자기 자신 제외
+            similarity_score = user_similarity_matrix[i, j]
+            if similarity_score > 0: # 0보다 큰 유사도만 기록 (조정 가능)
+                similarity_data.append({
+                    'user1_idx': i,
+                    'user2_idx': j,
+                    'similarity_score': similarity_score
+                })
+
+    final_similarity_df = pd.DataFrame(similarity_data)
+    logger.info(f"사용자 유사도 계산 완료. 유사한 사용자 쌍: {len(final_similarity_df)}")
     
-    return final_recommendations_with_scores[:num_recommendations]
+    # user_similarity_matrix도 csr_matrix 형태로 반환
+    user_similarity_matrix_sparse = csr_matrix(user_similarity_matrix)
+    
+    return final_similarity_df, user_similarity_matrix_sparse # DataFrame과 Sparse Matrix 모두 반환
+
+
+def calculate_content_similarity_sparse(user_item_matrix: csr_matrix) -> csr_matrix:
+    logger.info("콘텐츠 유사도 계산 시작...")
+    if user_item_matrix.shape[1] == 0: # 콘텐츠 수가 0인지 확인
+        logger.warning("user_item_matrix에 콘텐츠가 없어 콘텐츠 유사도를 계산할 수 없습니다.")
+        return csr_matrix((0,0)) # 빈 희소 행렬 반환
+
+    # 콘텐츠-콘텐츠 코사인 유사도 계산 (사용자-아이템 행렬의 전치에 대해 계산)
+    content_similarity_matrix = cosine_similarity(user_item_matrix.T)
+    logger.info(f"콘텐츠 유사도 계산 완료. Shape: {content_similarity_matrix.shape}")
+    return csr_matrix(content_similarity_matrix) # 희소 행렬로 반환
+
+
+def calculate_persona_similarity() -> pd.DataFrame:
+    """
+    페르소나 간의 유사도를 계산합니다.
+    페르소나-장르 매핑을 기반으로 코사인 유사도를 사용합니다.
+    pbr_app_state.persona_df에는 'persona_id'와 'name' 컬럼이 있고,
+    pbr_app_state.genres_df에는 'id'와 'name' 컬럼이 있다고 가정합니다.
+    """
+    logger.info("페르소나 유사도 계산 중...")
+
+    persona_df = pbr_app_state.persona_df
+    persona_genres_df = pbr_app_state.persona_genres_df
+    genres_df = pbr_app_state.genres_df
+
+    if persona_df is None or persona_df.empty or \
+       persona_genres_df is None or persona_genres_df.empty or \
+       genres_df is None or genres_df.empty:
+        logger.warning("페르소나 관련 데이터가 없어 페르소나 유사도를 계산할 수 없습니다. 빈 DataFrame을 반환합니다.")
+        return pd.DataFrame(columns=['persona_id_1', 'persona_id_2', 'similarity_score'])
+
+    # 페르소나-장르 데이터와 장르 데이터를 병합
+    persona_genre_merged = persona_genres_df.merge(
+        genres_df, left_on='genre_id', right_on='id', suffixes=('_persona', '_genre')
+    )
+
+    # 피벗 테이블을 사용하여 페르소나-장르 원-핫 인코딩 매트릭스 생성
+    # 각 페르소나가 어떤 장르를 가지고 있는지 0 또는 1로 표시
+    persona_genre_matrix = persona_genre_merged.pivot_table(
+        index='persona_id', columns='name', aggfunc='size', fill_value=0
+    ).fillna(0)
+
+    if persona_genre_matrix.empty:
+        logger.warning("페르소나-장르 매트릭스가 비어 있습니다. 페르소나 유사도를 계산할 수 없습니다.")
+        return pd.DataFrame(columns=['persona_id_1', 'persona_id_2', 'similarity_score'])
+
+    # 코사인 유사도 계산
+    persona_similarity = cosine_similarity(persona_genre_matrix)
+    persona_similarity_df = pd.DataFrame(persona_similarity,
+                                         index=persona_genre_matrix.index,
+                                         columns=persona_genre_matrix.index)
+
+    # 결과 DataFrame 생성
+    similarities = []
+    for i in range(persona_similarity_df.shape[0]):
+        for j in range(i + 1, persona_similarity_df.shape[1]): # 중복 및 자기 자신 제외
+            persona_id_1 = persona_similarity_df.index[i]
+            persona_id_2 = persona_similarity_df.columns[j]
+            score = persona_similarity_df.iloc[i, j]
+            similarities.append({
+                'persona_id_1': int(persona_id_1),
+                'persona_id_2': int(persona_id_2),
+                'similarity_score': score
+            })
+    final_persona_similarity_df = pd.DataFrame(similarities)
+
+    logger.info(f"페르소나 유사도 계산 완료. 결과 shape: {final_persona_similarity_df.shape}")
+    logger.info(f"페르소나 유사도 통계:\n{final_persona_similarity_df['similarity_score'].describe()}")
+
+    return final_persona_similarity_df
+
+
+def generate_persona_keywords(persona_df: pd.DataFrame) -> Dict[int, List[str]]:
+    """
+    주어진 페르소나 데이터프레임에서 각 페르소나의 키워드를 생성하고 맵으로 반환합니다.
+    (이전 data_loader에서 persona_details_map을 만들 때 키워드를 포함시켰으므로,
+    여기서는 해당 정보를 활용하거나 필요에 따라 생성 로직을 변경합니다.)
+    """
+    logger.info("페르소나 키워드 생성 시작...")
+    
+    persona_keyword_map: Dict[int, List[str]] = {}
+    
+    # pbr_app_state에 persona_details_map이 이미 채워져 있다고 가정
+    # 이 맵에서 'keywords' 정보를 가져와 사용합니다.
+    if pbr_app_state.persona_details_map:
+        for persona_id, details in pbr_app_state.persona_details_map.items():
+            if 'keywords' in details:
+                persona_keyword_map[persona_id] = details['keywords']
+    else:
+        logger.warning("pbr_app_state.persona_details_map이 비어 있습니다. 키워드를 생성할 수 없습니다.")
+        # 또는 persona_df와 genre_df, persona_genres_df를 사용하여 직접 생성하는 로직 추가
+        # (이전에 data_loader에서 이미 처리했으므로 여기서는 단순히 가져오는 것을 가정합니다.)
+        
+    logger.info("페르소나 키워드 생성 완료.")
+    return persona_keyword_map
+
+
+def update_user_persona_scores(
+    user_id: int,
+    db: Session
+):
+    logger.info(f"사용자 {user_id}의 페르소나 점수 업데이트 시작.")
+
+    # 1. 사용자 통합 피드백 생성 (최신 reactions, reviews, qa_answers 포함)
+    unified_feedback = generate_unified_user_feedback(user_id, db)
+
+    # 2. 통합 피드백 기반 페르소나 점수 계산
+    calculated_persona_scores_by_name = calculate_persona_scores_from_feedback(user_id, unified_feedback)
+
+    # 3. 페르소나 이름 -> ID 매핑을 사용하여 ID 기반 딕셔너리 생성
+    calculated_persona_scores_by_id = {
+        pbr_app_state.persona_name_to_id_map[name]: score
+        for name, score in calculated_persona_scores_by_name.items()
+        if name in pbr_app_state.persona_name_to_id_map
+    }
+
+    # 4. DB 및 pbr_app_state에 페르소나 점수 저장 (기존 로직)
+    # 이제 이 함수가 calculate_persona_scores_from_feedback에서 계산된 점수를 사용합니다.
+    try:
+        calculate_and_store_user_personas(db, user_id, calculated_persona_scores_by_id)
+        logger.info(f"사용자 {user_id}의 페르소나 점수 DB 업데이트 완료.")
+    except Exception as e:
+        logger.error(f"사용자 {user_id}의 페르소나 점수 DB 저장 중 오류 발생: {e}", exc_info=True)
+        # 여기서 예외를 다시 발생시켜 상위 함수에서 처리하도록 할 수 있습니다.
+        # raise
+
+    # --- 추가된 부분: 메모리 내 pbr_app_state 데이터 갱신 ---
+    logger.info(f"메모리 내 pbr_app_state.all_user_personas_df 및 user_persona_scores_map 갱신 시도.")
+    try:
+        # DB에서 최신 UserPersonas 데이터 다시 로드
+        result = db.execute(text("SELECT * FROM user_personas"))
+        all_user_personas_df_updated = pd.DataFrame(result.fetchall(), columns=result.keys())
+        pbr_app_state.all_user_personas_df = all_user_personas_df_updated
+        
+        # user_persona_scores_map 재구축
+        pbr_app_state.user_persona_scores_map = {}
+        for _, row in pbr_app_state.all_user_personas_df.iterrows():
+            user_id_from_df = row['user_id']
+            persona_id = row['persona_id']
+            score = row['score']
+            if user_id_from_df not in pbr_app_state.user_persona_scores_map:
+                pbr_app_state.user_persona_scores_map[user_id_from_df] = {}
+            pbr_app_state.user_persona_scores_map[user_id_from_df][persona_id] = score
+        
+        logger.info(f"pbr_app_state.all_user_personas_df 갱신 완료. {len(pbr_app_state.all_user_personas_df)}개 레코드.")
+        logger.info(f"pbr_app_state.user_persona_scores_map 갱신 완료. {len(pbr_app_state.user_persona_scores_map)}개 사용자.")
+
+    except Exception as e:
+        logger.error(f"메모리 내 pbr_app_state 데이터 갱신 중 오류 발생: {e}", exc_info=True)
+    # --- 추가된 부분 끝 ---
+
+    logger.info(f"사용자 {user_id}의 페르소나 점수 업데이트 처리 완료.")
+
+
+def generate_unified_user_feedback(user_id: int, db: Session) -> Dict[Tuple[int, str], float]:
+    """
+    사용자의 좋아요/싫어요 및 리뷰 데이터를 통합하여 각 콘텐츠에 대한 피드백 점수를 생성합니다.
+    이 함수는 User QA Answers (pbr_app_state.user_qa_answers_df)에 대한 가중치도 고려할 수 있습니다.
+    ContentReaction 및 Review 객체에는 'content_id' 필드가 있다고 가정합니다.
+    """
+    logger.info(f"사용자 {user_id}의 통합 피드백 생성 중...")
+    unified_feedback: Dict[int, float] = defaultdict(float)
+
+    # 1. 좋아요/싫어요 반응 처리
+    reactions = db.query(ContentReaction).filter(ContentReaction.user_id == user_id).all()
+    for reaction in reactions:
+        key = (reaction.content_id, reaction.type)
+        if reaction.reaction == ReactionType.LIKE:
+            unified_feedback[key] += LIKE_WEIGHT
+        elif reaction.reaction == ReactionType.DISLIKE:
+            unified_feedback[key] += DISLIKE_WEIGHT # DISLIKE_WEIGHT는 음수 값으로 설정 가정
+    logger.info(f"ContentReaction {len(reactions)}개 처리 완료.")
+
+    # 2. 리뷰(별점) 처리
+    reviews = db.query(Review).filter(Review.user_id == user_id).all()
+    for review in reviews:
+        key = (review.content_id, review.type)
+        score = STAR_RATING_WEIGHTS.get(review.score, 0.0)
+        unified_feedback[key] += score
+    logger.info(f"Review {len(reviews)}개 처리 완료.")
+
+    # 3. QA 답변 데이터 처리 (pbr_app_state.user_qa_answers_df 사용)
+    if pbr_app_state.user_qa_answers_df is not None and not pbr_app_state.user_qa_answers_df.empty:
+        user_qa_df = pbr_app_state.user_qa_answers_df[pbr_app_state.user_qa_answers_df['user_id'] == user_id]
+        for _, row in user_qa_df.iterrows():
+            qa_content_id = row.get('content_id') # user_qa_answers_df의 'content_id' 컬럼
+            qa_score = row.get('score')
+            if qa_content_id is not None and qa_score is not None:
+                unified_feedback[qa_content_id] += qa_score * QA_WEIGHT
+
+    logger.info(f"사용자 {user_id}의 통합 피드백 생성 완료. {len(unified_feedback)}개의 콘텐츠에 대한 피드백.")
+    return unified_feedback
+
+def _get_persona_genre_mapping(db: Session) -> Dict[int, List[str]]:
+    """
+    DB에서 페르소나-장르 매핑을 로드합니다.
+    pbr_app_state.persona_genres_df와 pbr_app_state.genres_df를 사용하여 매핑을 생성합니다.
+    결과: {persona_id: [genre_name1, genre_name2, ...]}
+    """
+    if pbr_app_state.persona_genres_df is None or pbr_app_state.genres_df is None:
+        logger.warning("페르소나-장르 매핑을 위한 데이터프레임이 로드되지 않았습니다.")
+        return {}
+
+    persona_genre_map = defaultdict(list)
+    
+    # 먼저 장르 ID와 이름 매핑 생성
+    genre_id_to_name = pbr_app_state.genres_df.set_index('id')['name'].to_dict()
+
+    # persona_genres_df를 순회하며 매핑 생성
+    for _, row in pbr_app_state.persona_genres_df.iterrows():
+        persona_id = row['persona_id']
+        genre_id = row['genre_id']
+        genre_name = genre_id_to_name.get(genre_id)
+        if genre_name:
+            persona_genre_map[persona_id].append(genre_name)
+    
+    return dict(persona_genre_map)
+
+
+def calculate_persona_scores_from_feedback(
+    user_id: int,
+    unified_feedback: Dict[int, float]
+) -> Dict[str, float]:
+    """
+    사용자의 통합 피드백을 기반으로 각 페르소나에 대한 점수를 계산합니다.
+    Args:
+        user_id: 사용자 ID.
+        unified_feedback: 사용자로부터 통합된 콘텐츠 피드백 (content_id -> score).
+                          reaction과 review 점수가 통합된 딕셔너리입니다.
+    Returns:
+        각 페르소나의 이름에 대한 점수를 담은 딕셔너리 (persona_name -> score).
+    """
+    logger.info(f"사용자 {user_id}의 피드백 기반 페르소나 점수 계산 시작.")
+
+    if pbr_app_state.persona_details_map is None or not pbr_app_state.persona_details_map:
+        logger.error("페르소나 상세 정보(persona_details_map)가 로드되지 않았습니다.")
+        return {}
+
+    # 페르소나 이름으로 점수를 저장할 딕셔너리
+    persona_scores: Dict[str, float] = defaultdict(float) 
+
+    # 1. 콘텐츠 기반 피드백 처리 (긍정적인 반응 장르 수집)
+    user_positive_genres: Set[str] = set()
+    if unified_feedback: # 통합 피드백이 비어있지 않은 경우에만 처리
+        logger.info(f"사용자 {user_id}의 콘텐츠 피드백 기반 페르소나 점수 계산 시작.")
+        
+        # contents_df에 'content_id'가 필요하다면, 이 부분은 data_loader에서 미리 처리하는 것이 좋습니다.
+        # 하지만 여기서는 방어적으로 다시 체크합니다.
+        if 'content_id' not in pbr_app_state.contents_df.columns or \
+           not pd.api.types.is_numeric_dtype(pbr_app_state.contents_df['content_id']):
+            pbr_app_state.contents_df['content_id'] = pd.to_numeric(
+                pbr_app_state.contents_df['content_id'], errors='coerce'
+            )
+            logger.warning("pbr_app_state.contents_df['content_id']를 'content_id'로 변환했습니다.")
+
+        for (content_id, content_type), feedback_score in unified_feedback.items():
+            # 긍정적인 피드백 또는 모든 피드백을 고려할지 결정 (현재 코드는 >0만 고려)
+            if feedback_score > 0: 
+                # 정수형 content_id_orig와 type을 사용하여 필터링
+                content_row = pbr_app_state.contents_df[
+                    (pbr_app_state.contents_df['content_id'] == content_id) & # 'content_id' 사용
+                    (pbr_app_state.contents_df['type'] == content_type)
+                ]
+                
+                if not content_row.empty and len(content_row['genres'].iloc[0]) > 0:
+                    genres_str = content_row['genres'].iloc[0]
+                    # genres_str은 이미 리스트이므로 바로 사용
+                    genres_list = [g.strip() for g in genres_str if isinstance(g, str) and g.strip()]
+                    user_positive_genres.update(genres_list)
+
+                    # 콘텐츠 피드백 기반 페르소나 점수 추가 (기존 로직 유지)
+                    for genre_name in genres_list:
+                        genre_id = pbr_app_state.genre_name_to_id_map.get(genre_name)
+                        if genre_id is not None:
+                            relevant_personas_from_genre = pbr_app_state.persona_genres_df[
+                                pbr_app_state.persona_genres_df['genre_id'] == genre_id
+                            ]['persona_id'].tolist()
+
+                            for p_id in relevant_personas_from_genre:
+                                persona_name = pbr_app_state.persona_id_to_name_map.get(p_id)
+                                if persona_name:
+                                    persona_scores[persona_name] += feedback_score * CONTENT_FEEDBACK_WEIGHT
+        logger.info(f"콘텐츠 피드백 기반 페르소나 점수 계산 완료. 현재 점수: {dict(persona_scores)}")
+    else:
+        logger.info(f"사용자 {user_id}의 콘텐츠 피드백이 없습니다.")
+
+
+    # 각 페르소나의 키워드(장르)와 사용자 긍정 장르를 비교하여 점수 계산
+    # 이 부분은 QA 답변 처리와 별개로, 'user_positive_genres'를 직접 활용하여 점수를 초기화하거나 추가할 수 있습니다.
+    # 기존 코드에서 이 로직이 'user_positive_genres'를 기반으로 이미 점수를 매기고 있으므로, 이 부분은 통합되었습니다.
+
+    # 2. QA 답변 기반 피드백 처리
+    if pbr_app_state.user_qa_answers_df is not None and not pbr_app_state.user_qa_answers_df.empty:
+        user_answers = pbr_app_state.user_qa_answers_df[pbr_app_state.user_qa_answers_df['user_id'] == user_id]
+        
+        if pbr_app_state.options_df is None or pbr_app_state.options_df.empty:
+            logger.warning("Options 데이터가 로드되지 않아 QA 답변 기반 페르소나 점수 계산을 건너뜝니다.")
+        else:
+            for _, answer_row in user_answers.iterrows():
+                question_id = answer_row['question_id']
+                option_id = answer_row['option_id']
+                
+                matched_option = pbr_app_state.options_df[
+                    (pbr_app_state.options_df['question_id'] == question_id) &
+                    (pbr_app_state.options_df['option_id'] == option_id)
+                ]
+                
+                if not matched_option.empty:
+                    answer_score_weight = matched_option['score'].iloc[0]
+                    
+                    relevant_persona_options = pbr_app_state.persona_options_df[
+                        (pbr_app_state.persona_options_df['question_id'] == question_id) &
+                        (pbr_app_state.persona_options_df['option_id'] == option_id)
+                    ]
+                    
+                    for _, po_row in relevant_persona_options.iterrows():
+                        persona_id_qa = po_row['persona_id']
+                        persona_name_qa = pbr_app_state.persona_id_to_name_map.get(persona_id_qa) # 페르소나 이름으로 변환
+                        if persona_name_qa:
+                            persona_scores[persona_name_qa] += answer_score_weight
+
+
+    # 3. 점수 정규화 및 최소 점수 적용
+    # 모든 페르소나 이름을 가져와서 점수가 없는 페르소나에도 최소 점수를 부여
+    all_persona_names = []
+    if pbr_app_state.persona_details_map:
+        for persona_detail in pbr_app_state.persona_details_map.values():
+            persona_name = persona_detail.get('persona_name')
+            if persona_name:
+                all_persona_names.append(persona_name)
+    else:
+        logger.warning("persona_details_map이 로드되지 않았습니다. 모든 페르소나 이름을 가져올 수 없습니다.")
+
+    # 모든 페르소나 이름에 대해 최소 점수 적용
+    for p_name in all_persona_names:
+        if p_name not in persona_scores:
+            persona_scores[p_name] = MIN_PERSONA_SCORE
+
+    total_score_sum = sum(persona_scores.values())
+
+    if total_score_sum > 0:
+        for persona_name in persona_scores:
+            # 점수 정규화
+            persona_scores[persona_name] = (persona_scores[persona_name] / total_score_sum) * MAX_EXPECTED_PERSONA_SCORE
+            # 최소 점수 보장
+            persona_scores[persona_name] = max(persona_scores[persona_name], MIN_PERSONA_SCORE)
+    else:
+        # 모든 점수가 0이거나 피드백이 없을 경우, 모든 페르소나에 최소 점수 부여
+        for persona_name in all_persona_names:
+            persona_scores[persona_name] = MIN_PERSONA_SCORE
+
+    logger.info(f"사용자 {user_id}의 최종 페르소나 점수: {dict(persona_scores)}")
+    return dict(persona_scores)
+
+
+def get_hybrid_persona(
+    user_id: int,
+    unified_feedback: pd.DataFrame,
+    db: Session
+) -> Tuple[Optional[int], Optional[int], Optional[str], Optional[str], Dict[str, float]]:
+    """
+    사용자의 통합 피드백을 기반으로 메인 및 서브 페르소나를 결정합니다.
+    "아기" 페르소나 로직을 적용합니다 (표시용).
+    반환값: (main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores)
+    """
+    logger.info(f"사용자 {user_id}의 하이브리드 페르소나 결정 시작.")
+
+    all_personas_scores = calculate_persona_scores_from_feedback(user_id, unified_feedback)
+    logger.info(f"DEBUG: get_hybrid_persona 내부에서 all_personas_scores 확인: {all_personas_scores}")
+
+    if not all_personas_scores:
+        logger.warning(f"사용자 {user_id}에 대한 페르소나 점수를 계산할 수 없습니다. 기본값 반환.")
+        return None, None, None, None, {}
+
+    # 점수를 내림차순으로 정렬
+    sorted_personas = sorted(all_personas_scores.items(), key=lambda item: item[1], reverse=True)
+
+    main_persona_name = None
+    sub_persona_name = None
+    main_persona_id = None
+    sub_persona_id = None
+    main_persona_score = 0.0
+
+    original_main_persona_name = None # '아기' 접두사를 붙이기 전의 원래 메인 페르소나 이름
+    
+    if sorted_personas:
+        # 항상 가장 높은 점수의 페르소나가 메인 페르소나의 기반이 됩니다.
+        original_main_persona_name = sorted_personas[0][0]
+        main_persona_score = sorted_personas[0][1]
+        main_persona_id = pbr_app_state.persona_name_to_id_map.get(original_main_persona_name) # <-- 실제 추천에 사용될 ID
+        main_persona_name = original_main_persona_name # API 응답에 사용될 이름 (아직 '아기' 접두사 없음)
+
+        # 두 번째로 높은 점수의 페르소나가 서브 페르소나
+        if len(sorted_personas) > 1:
+            sub_persona_name = sorted_personas[1][0]
+            sub_persona_score = sorted_personas[1][1]
+            sub_persona_id = pbr_app_state.persona_name_to_id_map.get(sub_persona_name)
+        else: 
+            sub_persona_name = None
+            sub_persona_id = None
+            sub_persona_score = 0.0 # 서브 페르소라 점수 초기화 (계산에 사용)
+
+        # "아기" 페르소나 로직 (표시용):
+        # 메인과 서브 페르소나가 모두 존재하고 점수 차이가 10 미만일 때 "아기" 접두사 적용
+        if sub_persona_name is not None and (main_persona_score - sub_persona_score) < 10:
+            logger.info(f"사용자 {user_id}: 메인 페르소나 '{original_main_persona_name}'({main_persona_score:.2f})와 서브 페르소나 '{sub_persona_name}'({sub_persona_score:.2f})의 점수 차이가 10 미만이므로 '아기' 페르소나로 분류합니다 (표시용).")
+            
+            # API 응답에 사용될 main_persona_name에 "아기" 접두사 추가
+            main_persona_name = f"아기 {original_main_persona_name}" 
+            
+            # 중요: main_persona_id는 계속 원래 페르소나의 ID를 유지합니다. (추천 로직 영향 없음)
+            # all_personas_scores의 값은 변경하지 않고 원본 점수를 유지합니다.
+
+        else:
+            logger.info(f"사용자 {user_id}: 결정된 메인 페르소나: {main_persona_name} (ID: {main_persona_id if main_persona_id is not None else '없음'}), 서브 페르소나: {sub_persona_name if sub_persona_name else '없음'} (ID: {sub_persona_id if sub_persona_id is not None else '없음'})")
+    else:
+        logger.warning(f"사용자 {user_id}에 대해 정렬된 페르소나가 없습니다. 기본값 반환.")
+
+    # 반환되는 main_persona_id는 추천 로직에서 사용되며,
+    # '아기' 페르소나의 경우에도 실제 페르소나 ID를 가집니다.
+    # main_persona_name은 '아기' 접두사가 붙을 수 있습니다.
+    return main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores
+
+
+# def update_persona_recommendations_cache_by_persona_id(persona_id: int, num_recommendations: int):
+#     logger.info(f"페르소나 ID {persona_id}에 대한 추천 캐시 업데이트 중...")
+#     try:
+#         recommendations = _get_popular_contents_for_persona(persona_id, num_recommendations=num_recommendations)
+#         if recommendations:
+#             if pbr_app_state.recommendation_cache is None:
+#                 pbr_app_state.recommendation_cache = {}
+
+#             pbr_app_state.recommendation_cache[persona_id] = {
+#                 "recommendations": recommendations,
+#                 "timestamp": datetime.now()
+#             }
+#             logger.info(f"페르소나 ID {persona_id}에 대한 추천 캐시 업데이트 완료.")
+#         else:
+#             logger.warning(f"페르소나 ID {persona_id}에 대한 인기 기반 추천을 생성할 수 없어 캐시를 업데이트하지 못했습니다.")
+#     except Exception as e:
+#         logger.error(f"페르소나 ID {persona_id}에 대한 추천 캐시 업데이트 중 오류 발생: '{e}'", exc_info=True)
+
+# def get_recommendations_from_cache_by_persona_id(persona_id: int) -> Optional[List[RecommendedContent]]:
+#     """
+#     캐시에서 특정 페르소나 ID에 대한 추천을 가져옵니다.
+#     만료 시간을 확인하여 유효한 경우에만 반환합니다.
+#     """
+#     if pbr_app_state.recommendation_cache is None:
+#         return None
+#     cached_data = pbr_app_state.recommendation_cache.get(persona_id)
+#     if cached_data:
+#         timestamp = cached_data.get("timestamp")
+#         if (datetime.now() - timestamp).total_seconds() < RECOMMENDATION_CACHE_EXPIRATION_SECONDS:
+#             return cached_data.get("recommendations")
+#         else:
+#             logger.info(f"페르소나 ID {persona_id}의 추천 캐시가 만료되었습니다.")
+#             del pbr_app_state.recommendation_cache[persona_id] # 만료된 캐시 제거
+#     return None
+
+def _get_general_popular_recommendations(user_id: int, num_recommendations: int, content_type_filter: Optional[str] = None, db: Session = None) -> List[RecommendedContent]:
+    """
+    모든 콘텐츠 중에서 가장 인기 있는 콘텐츠를 반환합니다.
+    (장르나 페르소나에 관계없이 전체 데이터에서 인기 순으로 정렬)
+    content_type_filter를 통해 특정 유형의 콘텐츠만 필터링할 수 있습니다.
+    """
+    logger.info(f"전체 인기 콘텐츠 {num_recommendations}개를 가져오는 중 (유형 필터: {content_type_filter}).")
+
+    if pbr_app_state.contents_df is None or pbr_app_state.reactions_df is None:
+        logger.warning("contents_df 또는 reactions_df가 로드되지 않았습니다. 인기 콘텐츠를 가져올 수 없습니다.")
+        return []
+
+    # 콘텐츠 타입 필터링
+    filtered_contents_df = pbr_app_state.contents_df
+    if content_type_filter:
+        filtered_contents_df = filtered_contents_df[filtered_contents_df['type'] == content_type_filter]
+        if filtered_contents_df.empty:
+            logger.warning(f"유형 '{content_type_filter}'에 해당하는 콘텐츠가 없습니다.")
+            return []
+
+    # 각 콘텐츠별 좋아요/싫어요 개수 집계
+    content_likes = pbr_app_state.reactions_df[pbr_app_state.reactions_df['reaction'] == ReactionType.LIKE] \
+        .groupby(['content_id'])['content_id'].count().reset_index(name='like_count')
+    
+    content_dislikes = pbr_app_state.reactions_df[pbr_app_state.reactions_df['reaction'] == ReactionType.DISLIKE] \
+        .groupby(['content_id'])['content_id'].count().reset_index(name='dislike_count')
+
+    # 필터링된 콘텐츠 데이터와 좋아요/싫어요 데이터 병합
+    all_contents_with_popularity = pd.merge(filtered_contents_df, content_likes, on='content_id', how='left')
+    all_contents_with_popularity = pd.merge(all_contents_with_popularity, content_dislikes, on='content_id', how='left')
+
+    # NaN 값을 0으로 채우기
+    all_contents_with_popularity['like_count'] = all_contents_with_popularity['like_count'].fillna(0)
+    all_contents_with_popularity['dislike_count'] = all_contents_with_popularity['dislike_count'].fillna(0)
+
+    # 인기 점수 계산
+    all_contents_with_popularity['popularity_score'] = all_contents_with_popularity['like_count'] - all_contents_with_popularity['dislike_count']
+
+    # 이미 본 콘텐츠 제외 (여기서는 user_id를 받으므로, 실제 유저의 시청 기록을 제외하는 로직 추가)
+    user_idx = pbr_app_state.user_id_to_idx_map.get(user_id)
+    if user_idx is not None and pbr_app_state.user_item_matrix is not None:
+        viewed_content_indices = pbr_app_state.user_item_matrix[user_idx].nonzero()[1]
+        # map의 value가 튜플 (content_id, type)이므로, 첫 번째 요소인 content_id만 추출합니다.
+        viewed_content_ids = {pbr_app_state.idx_to_content_id_map[idx][0] for idx in viewed_content_indices}
+        all_contents_with_popularity = all_contents_with_popularity[
+            ~all_contents_with_popularity['content_id'].isin(viewed_content_ids)
+        ]
+
+    # 인기 점수 기준으로 정렬 및 상위 N개 콘텐츠 선택 (필터링 후 개수가 줄어들 수 있음)
+    # 이 부분에서 .head(num_recommendations)를 하면, 제외된 후 개수가 적어질 수 있습니다.
+    # 따라서 정렬만 하고, 아래 루프에서 개수를 제어하는 것이 좋습니다.
+    sorted_popular_contents = all_contents_with_popularity.sort_values(by='popularity_score', ascending=False)
+
+    recommended_list = []
+    current_count = 0
+    for _, row in sorted_popular_contents.iterrows():
+        if current_count >= num_recommendations:
+            break # 원하는 개수만큼 채워지면 중단
+
+        recommended_list.append(_create_recommended_content(
+            content_id=row['content_id'],
+            predicted_rating=row['popularity_score'],
+            persona_genre_match=None
+        ))
+        current_count += 1
+        
+    logger.info(f"전체 인기 콘텐츠 {len(recommended_list)}개 생성 완료.")
+    return recommended_list
+
+
+def _get_popular_contents_for_persona(persona_id: int, num_recommendations: int) -> List[RecommendedContent]:
+    """
+    특정 페르소나와 관련된 인기 콘텐츠를 가져옵니다.
+    페르소나에 매칭되는 장르가 없을 경우, 전체 인기 콘텐츠를 반환합니다.
+    """
+    logger.info(f"페르소나 ID {persona_id}를 위한 인기 기반 추천 생성 중...")
+
+    if pbr_app_state.contents_df is None or pbr_app_state.reactions_df is None or pbr_app_state.persona_genres_df is None:
+        logger.warning("필수 데이터프레임(contents_df, reactions_df, persona_genres_df)이 로드되지 않았습니다.")
+        return []
+
+    # 1. 해당 페르소나와 연결된 장르 ID 가져오기
+    # 'match_score' 대신 persona_genres_df에 해당 persona_id가 존재하는지 확인
+    persona_matched_genres_df = pbr_app_state.persona_genres_df[
+        (pbr_app_state.persona_genres_df['persona_id'] == persona_id)
+    ]
+
+    if persona_matched_genres_df.empty:
+        logger.info(f"페르소나 ID {persona_id}에 매칭되는 장르가 없습니다. 전체 인기 콘텐츠로 폴백합니다.")
+        return _get_general_popular_recommendations(user_id=None, num_recommendations=num_recommendations) # user_id는 여기서는 의미 없으므로 None 전달
+
+    persona_genre_ids = persona_matched_genres_df['genre_id'].unique().tolist()
+    
+    if not persona_genre_ids:
+        logger.info(f"페르소나 ID {persona_id}에 연결된 장르 ID가 없습니다. 전체 인기 콘텐츠로 폴백합니다.")
+        return _get_general_popular_recommendations(user_id=None, num_recommendations=num_recommendations)
+
+    # 2. 페르소나 장르에 해당하는 콘텐츠 필터링
+    # contents_df의 'genres' 컬럼이 리스트 형태로 되어 있다고 가정
+    # 각 콘텐츠의 장르 리스트와 페르소나 장르 리스트의 교집합이 하나라도 있으면 매칭
+    
+    # 먼저 genreId_orig를 통해 genre name을 얻기 위한 매핑 생성
+    genre_id_to_name_map = pbr_app_state.genres_df.set_index('id')['name'].to_dict()
+    persona_genre_names = [genre_id_to_name_map[gid] for gid in persona_genre_ids if gid in genre_id_to_name_map]
+
+    if not persona_genre_names:
+        logger.info(f"페르소나 ID {persona_id}에 연결된 유효한 장르 이름이 없습니다. 전체 인기 콘텐츠로 폴백합니다.")
+        return _get_general_popular_recommendations(user_id=None, num_recommendations=num_recommendations)
+
+    # DataFrame apply를 사용하여 각 콘텐츠의 'genres' 리스트와 페르소나 장르를 비교
+    # `genres` 컬럼이 문자열로 저장되어 있다면 ast.literal_eval 등으로 리스트로 변환 필요
+    # 현재 `generate_unified_user_feedback`에서 'genres'를 리스트로 변환하고 있으므로,
+    # contents_df에도 동일한 로직이 적용되어야 합니다.
+    
+    # Assuming contents_df['genres'] is already a list or can be safely converted
+    # If not, add: contents_df['genres'] = contents_df['genres'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    
+    # 로드 시점에 이미 처리되었다고 가정하고 진행 (contents_df 로딩 부분에서 변환하는 것이 이상적)
+    
+    matched_contents = pbr_app_state.contents_df[
+        pbr_app_state.contents_df['genres'].apply(
+        lambda content_genres: bool(set(content_genres if content_genres is not None else []).intersection(persona_genre_names))
+        )   
+    ]
+
+    if matched_contents.empty:
+        logger.info(f"페르소나 ID {persona_id}의 장르와 매칭되는 콘텐츠가 없습니다. 전체 인기 콘텐츠로 폴백합니다.")
+        return _get_general_popular_recommendations(user_id=None, num_recommendations=num_recommendations)
+
+    # 3. 필터링된 콘텐츠의 인기 점수 계산 및 정렬
+    content_likes = pbr_app_state.reactions_df[pbr_app_state.reactions_df['reaction'] == ReactionType.LIKE] \
+        .groupby(['content_id'])['content_id'].count().reset_index(name='like_count')
+    
+    content_dislikes = pbr_app_state.reactions_df[pbr_app_state.reactions_df['reaction'] == ReactionType.DISLIKE] \
+        .groupby(['content_id'])['content_id'].count().reset_index(name='dislike_count')
+
+    persona_contents_with_popularity = pd.merge(matched_contents, content_likes, on='content_id', how='left')
+    persona_contents_with_popularity = pd.merge(persona_contents_with_popularity, content_dislikes, on='content_id', how='left')
+
+    persona_contents_with_popularity['like_count'] = persona_contents_with_popularity['like_count'].fillna(0)
+    persona_contents_with_popularity['dislike_count'] = persona_contents_with_popularity['dislike_count'].fillna(0)
+    persona_contents_with_popularity['popularity_score'] = persona_contents_with_popularity['like_count'] - persona_contents_with_popularity['dislike_count']
+
+    top_popular_contents = persona_contents_with_popularity.sort_values(by='popularity_score', ascending=False)
+    # .head(num_recommendations)를 여기서 바로 적용하면, 필터링 후 개수가 부족할 수 있으므로,
+    # 아래 루프에서 제어하는 것이 더 유연합니다.
+
+    recommended_list = []
+    current_count = 0 # 현재 추가된 추천 개수를 세는 변수
+    for _, row in top_popular_contents.iterrows():
+        # 여기에 user_id를 받아온다면, 이미 본 콘텐츠를 제외하는 로직을 추가할 수 있습니다.
+        # (현재 이 함수는 user_id를 받지 않으므로, 이 부분은 _get_persona_based_popular_fallback_recommendations에서 처리됨)
+
+        if current_count >= num_recommendations:
+            break # 원하는 개수만큼 채워졌으면 루프 종료
+
+        content_id = int(row['content_id'])
+        content_type = row['type'] # content_type 추가
+        
+        # _create_recommended_content 함수에 content_type도 전달 (필요하다면)
+        content_info = _create_recommended_content(
+            content_id=content_id,
+            predicted_rating=row['popularity_score'],
+            persona_genre_match=True # 1.0 대신 True로 변경
+        )
+        
+        if content_info.contentId is not None:
+            # 여기서 content_type_filter가 적용되지 않으므로, _get_persona_based_popular_fallback_recommendations에서 필터링해야 합니다.
+            recommended_list.append(content_info)
+            current_count += 1
+
+    # 만약 원하는 개수를 채우지 못했다면, 폴백 로직이 실행될 수 있습니다.
+    # 현재 코드에서는 return _get_general_popular_recommendations(user_id=None, num_recommendations=num_recommendations)
+    # 으로 처리하고 있습니다.
+    
+    logger.info(f"페르소나 ID {persona_id}를 위한 인기 기반 추천 {len(recommended_list)}개 생성 완료.")
+    return recommended_list
+
+
+def update_and_get_recommendations(
+    user_id: int,
+    db: Session,
+    num_recommendations: int = RECOMMENDATION_COUNT,
+    content_type_filter: Optional[str] = None) -> List[RecommendedContent]:
+    """
+    주어진 사용자 ID에 대한 추천 목록을 업데이트하고 반환합니다.
+    캐시된 페르소나 기반 추천을 우선적으로 사용하며, 필요한 경우 캐시를 업데이트합니다.
+    """
+    logger.info(f"사용자 {user_id}에 대한 추천 업데이트 및 조회 시작.")
+
+    unified_feedback = generate_unified_user_feedback(user_id, db)
+    main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores = \
+        get_hybrid_persona(user_id, unified_feedback, db)
+
+    # If no main persona is determined (e.g., Baby Persona), provide general popular recommendations
+    if main_persona_id is None:
+        logger.info(f"사용자 {user_id}의 메인 페르소나가 결정되지 않아 일반 인기 추천을 제공합니다.")
+        return _get_general_popular_recommendations(user_id, num_recommendations)
+
+    # _get_popular_contents_for_persona는 이제 RecommendedContent 객체 리스트를 반환합니다.
+    recommendations_for_persona: List[RecommendedContent] = _get_popular_contents_for_persona(
+        main_persona_id, num_recommendations=RECOMMENDATION_COUNT
+    )
+
+    # 캐시된 contentId 목록을 RecommendedContent 객체로 변환하여 반환
+    return recommendations_for_persona[:num_recommendations]
+
+def get_persona_based_popular_fallback_recommendations(
+    user_id: int,
+    main_persona_id: int,
+    num_recommendations: int, # 이 값은 'persona_router'에서 계산된 필요한 나머지 개수입니다.
+    db: Session,
+    content_type_filter: Optional[str] = None
+) -> List[RecommendedContent]:
+    """
+    페르소나 기반 인기 추천을 제공합니다.
+    주어진 main_persona_id에 해당하는 장르를 기반으로 인기 콘텐츠를 필터링합니다.
+    _get_popular_contents_for_persona 함수를 활용합니다.
+    """
+    logger.info(f"사용자 {user_id}를 위한 페르소나 {main_persona_id} 기반 인기 추천 생성 중 (요청 개수: {num_recommendations}, 유형 필터: {content_type_filter}).")
+
+    # 초기 인기 콘텐츠를 충분히 많이 가져와서 필터링 후에도 목표 개수를 채울 수 있도록 합니다.
+    # num_recommendations는 이미 필요한 나머지 개수이므로,
+    # 여기에 추가적인 여유분을 더해서 가져와야 필터링 후에도 개수가 부족하지 않습니다.
+    # 예를 들어, 요청 개수의 5배 또는 최소 50개 정도 (필요에 따라 조절)
+    initial_fetch_count = max(num_recommendations * 5, 50) # 최소 50개는 가져오도록
+    raw_persona_popular_contents = _get_popular_contents_for_persona(main_persona_id, initial_fetch_count)
+    logger.info(f"페르소나 ID {main_persona_id}를 위한 인기 기반 추천 초기 {len(raw_persona_popular_contents)}개 생성 완료 (요청: {initial_fetch_count}).")
+
+
+    current_filtered_list = []
+
+    # 1. 콘텐츠 타입 필터링
+    if content_type_filter:
+        for content in raw_persona_popular_contents:
+            if content.type == content_type_filter:
+                current_filtered_list.append(content)
+        logger.info(f"콘텐츠 타입 '{content_type_filter}' 필터링 후 {len(current_filtered_list)}개 남음.")
+    else:
+        # 타입 필터가 없으면 모든 원본 콘텐츠를 다음 단계로 전달
+        current_filtered_list = list(raw_persona_popular_contents)
+
+    # 2. 이미 본 콘텐츠 제외 (User-Item Matrix 기준)
+    user_idx = pbr_app_state.user_id_to_idx_map.get(user_id)
+    if user_idx is not None and pbr_app_state.user_item_matrix is not None:
+        # pbr_app_state.user_item_matrix는 이미 ReactionType.LIKE, ReactionType.DISLIKE, Review.score 등을 통합한 것으로 간주합니다.
+        # 즉, 0이 아닌 값들은 사용자가 상호작용한 콘텐츠를 의미합니다.
+        viewed_content_indices = pbr_app_state.user_item_matrix[user_idx].nonzero()[1]
+        
+        # pbr_app_state.idx_to_content_id_map에 content_id가 있는지 확인 필요
+        # idx_to_content_id_map이 딕셔너리가 아닌 리스트나 다른 형태일 경우 변경 필요
+        viewed_content_ids = {pbr_app_state.idx_to_content_id_map[idx] for idx in viewed_content_indices 
+                              if idx in pbr_app_state.idx_to_content_id_map} # 유효한 인덱스만 필터링
+
+        after_viewed_filter = []
+        for rec in current_filtered_list:
+            # RecommendedContent 스키마에 content_id 필드가 있을 것이라고 가정
+            if rec.contentId not in viewed_content_ids:
+                after_viewed_filter.append(rec)
+        current_filtered_list = after_viewed_filter
+        logger.info(f"이미 본 콘텐츠 제외 후 {len(current_filtered_list)}개 남음.")
+    else:
+        logger.info("사용자-아이템 매트릭스 정보를 찾을 수 없거나 사용자 인덱스가 없습니다. 시청 기록 필터링 건너_get_popular_contents_for_persona.")
+
+
+    # 3. 마지막으로 요청된 개수(num_recommendations)만큼만 슬라이싱하여 반환
+    # 필터링 후 남은 콘텐츠가 요청된 개수보다 적을 수 있으므로, 실제 남은 개수만큼만 반환
+    final_recommendations = current_filtered_list[:num_recommendations]
+    
+    logger.info(f"사용자 {user_id}를 위한 페르소나 {main_persona_id} 기반 인기 추천 최종 {len(final_recommendations)}개 생성 완료 (요청 개수: {num_recommendations}).")
+    return final_recommendations
+
+def has_genre_match(content_genres: List[str], persona_genres: List[str]) -> Optional[bool]:
+    if not content_genres or not persona_genres:
+        return None
+    return any(genre in persona_genres for genre in content_genres)
+
+
+def recommend_contents_cf(
+    user_id: int,
+    num_recommendations: int,
+    db: Session,
+    content_type_filter: Optional[str] = None,
+    persona_genres: Optional[List[str]] = None
+) -> List[RecommendedContent]:
+    """
+    사용자 기반 협업 필터링(User-Based Collaborative Filtering)을 사용하여
+    주어진 사용자에게 콘텐츠를 추천합니다.
+    """
+    logger.info(f"사용자 {user_id}에게 협업 필터링 기반 추천 생성 중 (유형 필터: {content_type_filter})...")
+    
+    if pbr_app_state.user_item_matrix is not None and \
+    (pbr_app_state.user_similarity_df is None or pbr_app_state.user_similarity_df.shape[0] == 0): # 여기가 수정되었습니다.
+        logger.info("user_similarity_df가 초기화되지 않아 새로 계산합니다.")
+        # calculate_user_similarity는 user_similarity_matrix (numpy array)를 반환합니다.
+        # 이를 csr_matrix로 변환하여 저장합니다.
+        # calculate_user_similarity 함수의 두 번째 반환값이 csr_matrix 입니다.
+        _, user_sim_matrix_sparse = calculate_user_similarity(
+            pbr_app_state.user_item_matrix,
+            pbr_app_state.user_id_to_idx_map # 이 인자도 필요합니다.
+        )
+        pbr_app_state.user_similarity_df = user_sim_matrix_sparse # CSR matrix를 저장하도록 변경
+
+        if pbr_app_state.user_similarity_df is None or pbr_app_state.user_similarity_df.shape[0] == 0:
+            logger.warning("user_similarity_df 계산에 실패했거나 비어 있습니다. CF 추천을 생성할 수 없습니다.")
+            return []
+
+    if pbr_app_state.user_item_matrix is None or \
+       pbr_app_state.user_similarity_df is None or \
+       pbr_app_state.user_id_to_idx_map is None or \
+       pbr_app_state.idx_to_content_id_map is None or \
+       pbr_app_state.contents_df is None:
+        logger.warning("필수 데이터(user_item_matrix, user_similarity_df, user/content mapping, contents_df)가 초기화되지 않았습니다.")
+        return []
+
+    if user_id not in pbr_app_state.user_id_to_idx_map:
+        logger.warning(f"사용자 ID {user_id}를 매핑에서 찾을 수 없습니다. 추천을 생성할 수 없습니다.")
+        return []
+
+    user_idx = pbr_app_state.user_id_to_idx_map[user_id]
+    num_users = pbr_app_state.user_item_matrix.shape[0]
+    num_contents = pbr_app_state.user_item_matrix.shape[1]
+
+     # 1. 대상 사용자와 유사한 사용자 찾기
+    # user_similarity_df는 이제 CSR matrix 입니다.
+    # 해당 사용자의 행을 가져와서 유사도를 추출합니다.
+    user_similarities_row = pbr_app_state.user_similarity_df.getrow(user_idx)
+
+    similar_users_info = []
+    # CSR matrix에서 0이 아닌 요소만 순회
+    for other_user_idx, similarity_score in zip(user_similarities_row.indices, user_similarities_row.data):
+        if other_user_idx == user_idx: # 자기 자신 제외
+            continue
+        if similarity_score > CF_SIMILARITY_THRESHOLD: # 설정된 임계값 이상인 유사 사용자만 고려
+            similar_users_info.append((other_user_idx, similarity_score))
+
+    # 유사도가 높은 순으로 정렬
+    similar_users_info.sort(key=lambda x: x[1], reverse=True)
+
+    # 2. 대상 사용자가 아직 평가하지 않은 콘텐츠에 대한 예상 점수 계산
+    predicted_ratings: Dict[int, float] = defaultdict(float)
+    similarity_sums: Dict[int, float] = defaultdict(float)
+
+    # 사용자가 이미 평가한 콘텐츠 목록
+    user_rated_contents = pbr_app_state.user_item_matrix[user_idx].nonzero()[1]
+    user_rated_content_ids = {pbr_app_state.idx_to_content_id_map[c_idx][0] for c_idx in user_rated_contents}
+
+    for other_user_idx, similarity in similar_users_info:
+        # 유사한 사용자의 평가 기록 가져오기
+        other_user_ratings_indices = pbr_app_state.user_item_matrix[other_user_idx].nonzero()[1]
+        for content_matrix_idx in other_user_ratings_indices:
+            original_content_id, content_type = pbr_app_state.idx_to_content_id_map[content_matrix_idx]
+
+            # 사용자가 이미 평가한 콘텐츠는 제외
+            if original_content_id in user_rated_content_ids:
+                continue
+
+            # 유형 필터 적용
+            if content_type_filter and content_type_filter != content_type:
+                continue
+
+            rating = pbr_app_state.user_item_matrix[other_user_idx, content_matrix_idx]
+
+            predicted_ratings[original_content_id] += rating * similarity
+            similarity_sums[original_content_id] += abs(similarity) # 음수 유사도도 고려하여 절댓값 사용
+
+    # 예상 점수 정규화
+    final_predicted_ratings = {}
+    for content_id, total_score in predicted_ratings.items():
+        if similarity_sums[content_id] > 0:
+            final_predicted_ratings[content_id] = total_score / similarity_sums[content_id]
+        else:
+            final_predicted_ratings[content_id] = 0 # 유사 사용자가 없거나 유사도 합이 0인 경우
+
+    # 3. 예상 점수가 높은 순으로 정렬하여 추천 콘텐츠 목록 생성
+    recommended_content_ids = sorted(final_predicted_ratings.items(), key=lambda item: item[1], reverse=True)
+
+    recommendations: List[RecommendedContent] = []
+    for content_id, predicted_rating in recommended_content_ids:
+        content_info = _create_recommended_content(content_id, predicted_rating=predicted_rating)
+
+        # 여기에 genre match 계산 추가
+        if persona_genres:
+            # 콘텐츠 장르 가져오기
+            content_row = pbr_app_state.contents_df[pbr_app_state.contents_df["content_id"] == content_id]
+            if not content_row.empty:
+                raw_genres = content_row.iloc[0]["genres"]
+                import ast
+                content_genres = ast.literal_eval(raw_genres) if isinstance(raw_genres, str) else raw_genres
+                content_info.persona_genre_match = has_genre_match(content_genres, persona_genres)
+
+
+    logger.info(f"사용자 {user_id}에게 {len(recommendations)}개의 협업 필터링 추천 생성 완료.")
+    return recommendations

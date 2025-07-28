@@ -1,96 +1,51 @@
-# 1. 좋아요/싫어요/별점 가중치 정의
-LIKE_WEIGHT = 5.0          
-DISLIKE_WEIGHT = -5.0      
-STAR_RATING_WEIGHTS = {  
-    0.5: -5.0, 
-    1.0: -3.5, 
-    1.5: -2.0, 
-    2.0: -1.0, 
-    2.5: 0.0, 
-    3.0: 0.5, 
-    3.5: 1.0, 
-    4.0: 2.0, 
-    4.5: 4.0, 
+# 상호작용 가중치 (user-item matrix 생성 시 사용)
+LIKE_WEIGHT = 5.0          # 좋아요 가중치 (사용자 제공)
+DISLIKE_WEIGHT = -5.0      # 싫어요 가중치 (사용자 제공)
+STAR_RATING_WEIGHTS = {    # 별점 가중치 (사용자 제공)
+    0.5: -5.0,
+    1.0: -3.5,
+    1.5: -2.0,
+    2.0: -1.0,
+    2.5: 0.0,
+    3.0: 0.5,
+    3.5: 1.0,
+    4.0: 2.0,
+    4.5: 4.0,
     5.0: 5.0
 }
 
+# 피드백 및 페르소나 결정 관련 임계값
+POSITIVE_FEEDBACK_THRESHOLD = 0.1               # 긍정적 피드백 임계값 (사용자 제공)
+QA_WEIGHT = 0.5                                 # QA 답변 가중치 (사용자 제공)
+CONTENT_FEEDBACK_WEIGHT = 0.5                   # 콘텐츠 피드백 가중치 (사용자 제공)
+MIN_FEEDBACK_FOR_PERSONA_DETERMINATION = 1      # 페르소나 결정에 필요한 최소 피드백 수 (사용자 제공)
+MIN_POSITIVE_RATINGS_FOR_GROWTH = 1             # 페르소나 성장을 위한 최소 긍정 평가 수 (사용자 제공)
+PENALTY_FOR_NO_PERSONA_MATCH = -1.5             # 매칭되는 페르소나가 없을 때의 페널티 (사용자 제공)
 
-# 2. 페르소나 분류 임계값 및 가중치
-POSITIVE_FEEDBACK_THRESHOLD = 0.1
-QA_WEIGHT = 0.5         
-CONTENT_FEEDBACK_WEIGHT = 0.5 
-MIN_FEEDBACK_FOR_PERSONA_DETERMINATION = 1
-MIN_POSITIVE_RATINGS_FOR_GROWTH = 1 
+# 유사도 임계값d
+PERSONA_SIMILARITY_THRESHOLD = 0.5  # 페르소나 유사도 임계값 (추가됨)
+CONTENT_SIMILARITY_THRESHOLD = 0.3  # 콘텐츠 유사도 임계값 (추가됨)
+CF_SIMILARITY_THRESHOLD = 0.1       # 협업 필터링 유사도 임계값 (사용자 제공 및 일치)
 
+# 추천 결과 수
+TOP_N_CONTENTS_FOR_POPULAR_PER_PERSONA = 100    # 페르소나별 인기 콘텐츠 추천 시 가져올 상위 N개 (추가됨)
+RECOMMENDATION_COUNT = 10                       # 최종 사용자에게 제공할 추천 콘텐츠 수 (사용자 제공 및 일치)
+SIMILAR_USERS_COUNT = 50                        # 협업 필터링에서 유사 사용자를 찾을 때 고려할 수 (추가됨)
+SIMILAR_CONTENTS_COUNT = 50                     # 콘텐츠 기반 필터링에서 유사 콘텐츠를 찾을 때 고려할 수 (추가됨)
 
-default_personas = {
-    '액션_헌터': {
-        'description': '강렬한 전개에 목숨 거는 유형! 한시도 눈을 뗄 수 없는 액션, 스릴러, SF에 푹 빠지는 스타일.',
-        'keywords': ['액션', '스릴러', '모험', '범죄', 'SF', '전쟁'],
-        'qa_mapping': {'Q1': 'A', 'Q2': 'A', 'Q3': 'B', 'Q4': 'C', 'Q5': 'B'}
-    },
-    '무비_셜록': {
-        'description': '디테일에 강한 분석러! 복선, 반전, 떡밥 회수에 기가 막히게 반응하는 타입.',
-        'keywords': ['미스터리', '범죄', '스릴러', '드라마', '다큐멘터리', '뉴스'],
-        'qa_mapping': {'Q1': 'B', 'Q2': 'C', 'Q3': 'A', 'Q4': 'D', 'Q5': 'C'}
-    },
-    '시네파_울보': {
-        'description': '눈물과 감동에 진심인 감정이입 장인! 인물의 감정선에 깊이 공감하는 섬세한 시청자.',
-        'keywords': ['드라마', '로맨스', '역사', '음악', '연속극'],
-        'qa_mapping': {'Q1': 'C', 'Q2': 'D', 'Q3': 'D', 'Q4': 'B', 'Q5': 'D'}
-    },
-    '온기_수집가': {
-        'description': '따뜻한 위로를 찾는 잔잔한 영화 큐레이터! 자극적인 건 피하고 편안하고 따뜻한 콘텐츠를 선호.',
-        'keywords': ['가족', '키즈', '애니메이션', '코미디', '드라마', '리얼리티', '토크'],
-        'qa_mapping': {'Q1': 'C', 'Q2': 'D', 'Q3': 'C', 'Q4': 'A', 'Q5': 'D'}
-    },
-    '이세계_유랑자': {
-        'description': '상상의 나래를 펼치는 현실 탈출러! 판타지, SF, 애니메이션 속 방대한 세계관에 푹 빠지는 스타일.',
-        'keywords': ['판타지', 'SF', '모험', '애니메이션', 'SF & 판타지'],
-        'qa_mapping': {'Q1': 'D', 'Q2': 'D', 'Q3': 'B', 'Q4': 'C', 'Q5': 'B'}
-    },
-    '무서워도본다맨': {
-        'description': '공포도 감내하는 스릴 마니아! 공포, 스릴러의 긴장감과 반전 쾌감에 중독된 타입.',
-        'keywords': ['공포', '스릴러', '미스터리', '범죄'],
-        'qa_mapping': {'Q1': 'D', 'Q2': 'C', 'Q3': 'C', 'Q4': 'D', 'Q5': 'C'}
-    },
-    '레트로_캡틴': {
-        'description': '고전의 매력에 빠진 클래식 무비 마니아! 아날로그 감성과 고풍스러운 시대극의 멋을 즐김.',
-        'keywords': ['서부', '역사', '다큐멘터리', '음악', '전쟁'],
-        'qa_mapping': {'Q1': 'C', 'Q2': 'B', 'Q3': 'D', 'Q4': 'B', 'Q5': 'A'}
-    }
-}
+# 인기 콘텐츠 관련
+MIN_VOTE_COUNT_FOR_POPULARITY = 1               # 인기도 계산을 위한 최소 투표 수 (사용자 제공)
 
-content_genre_keywords_mapping = {
-    '액션': ['액션'],
-    '모험': ['모험'],
-    '애니메이션': ['애니메이션'],
-    '코미디': ['코미디'],
-    '범죄': ['범죄'],
-    '다큐멘터리': ['다큐멘터리'],
-    '드라마': ['드라마'],
-    '가족': ['가족'],
-    '판타지': ['판타지'],
-    '역사': ['역사'],
-    '공포': ['공포'],
-    '음악': ['음악'],
-    '미스터리': ['미스터리'],
-    '로맨스': ['로맨스'],
-    'SF': ['SF'],
-    '스릴러': ['스릴러'],
-    '전쟁': ['전쟁'],
-    '서부': ['서부'],
-    '뉴스': ['뉴스'],
-    '리얼리티': ['리얼리티'],
-    '토크': ['토크'],
-    '연속극': ['연속극'], 
-    '키즈': ['키즈'], 
-    '전쟁 & 정치': ['전쟁 & 정치'], 
-    'SF & 판타지': ['SF & 판타지'],
-    '(장르 없음)': ['(장르 없음)'] 
-}
+# QA 답변 기반 초기 추천을 위한 임계값
+QA_INITIAL_RECOMMENDATION_THRESHOLD = 0.5       # QA 답변 기반 초기 추천을 위한 임계값 (사용자 제공)
 
-# 유사 사용자 필터링을 위한 임계값
-CF_SIMILARITY_THRESHOLD = 0.1
-# 페르소나 장르 불일치 시 페널티
-PENALTY_FOR_NO_PERSONA_MATCH = -1.5
+# 페르소나 점수 관련
+MAX_EXPECTED_PERSONA_SCORE = 100.0              # 임의의 최대 예상 점수 (사용자 제공)
+MIN_PERSONA_SCORE = 0.0                         # 점수가 음수가 될 가능성이 없다면 0으로 설정 (사용자 제공)
+BABY_PERSONA_THRESHOLD = 10.0                   # 메인 페르소나와 서브 페르소나 점수 차이 임계값 (사용자 제공)
+
+# 캐시 설정 (초 단위)
+RECOMMENDATION_CACHE_EXPIRATION_SECONDS = 3600 * 24 # 24시간 (데이터 새로고침 주기와 연관) (추가됨)
+
+# 로깅 설정
+LOG_LEVEL = "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL (추가됨)
