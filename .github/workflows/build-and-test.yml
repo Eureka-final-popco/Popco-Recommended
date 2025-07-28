@@ -98,6 +98,10 @@ jobs:
         DB_PASSWORD: test
         DB_NAME: test_db
         ENVIRONMENT: test
+        AWS_S3_BUCKET_NAME: test-bucket
+        AWS_S3_REGION: ap-northeast-2
+        AWS_ACCESS_KEY_ID: dummy-key
+        AWS_SECRET_ACCESS_KEY: dummy-secret
     
     # 결과 요약
     - name: Test Summary
