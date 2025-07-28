@@ -1070,18 +1070,13 @@ def recommend_contents_cf(
 
     recommendations: List[RecommendedContent] = []
     for content_id, predicted_rating in recommended_content_ids:
+        # _create_recommended_content 함수를 사용하여 RecommendedContent 객체 생성
         content_info = _create_recommended_content(content_id, predicted_rating=predicted_rating)
-
-        # 여기에 genre match 계산 추가
-        if persona_genres:
-            # 콘텐츠 장르 가져오기
-            content_row = pbr_app_state.contents_df[pbr_app_state.contents_df["content_id"] == content_id]
-            if not content_row.empty:
-                raw_genres = content_row.iloc[0]["genres"]
-                import ast
-                content_genres = ast.literal_eval(raw_genres) if isinstance(raw_genres, str) else raw_genres
-                content_info.persona_genre_match = has_genre_match(content_genres, persona_genres)
-
+        # 이미 이 함수 내에서 유형 필터링이 되었으므로 다시 필터링할 필요 없음.
+        if content_info.contentId is not None: # 유효한 contentId가 있는지 확인
+            recommendations.append(content_info)
+        if len(recommendations) >= num_recommendations:
+            break
 
     logger.info(f"사용자 {user_id}에게 {len(recommendations)}개의 협업 필터링 추천 생성 완료.")
     return recommendations
