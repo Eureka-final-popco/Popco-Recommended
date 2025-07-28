@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     DB_USERNAME: str
     DB_PASSWORD: str
     DB_NAME: str
+
+    AWS_S3_BUCKET_NAME: str
+    AWS_S3_REGION: str
+    AWS_ACCESS_KEY_ID: str
+    AWS_SECRET_ACCESS_KEY: str
     
     class Config:
         # 환경 우선순위: ENVIRONMENT > DOCKER_ENV > 기본값
