@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from pathlib import Path
 from datetime import datetime
 from .config import settings
-from .database import check_db_connection
+from .database import check_db_connection, get_db
 from .popcorithm.models import (
     MovieRecommendation, 
     RecommendationResponse
@@ -22,11 +22,41 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import sys
 import traceback
+from contextlib import asynccontextmanager
+import pandas as pd
+import logging
+
+from app.persona_based_recommender.state import pbr_app_state
+from app.persona_based_recommender.persona_router import persona_recommender_router
+from app.persona_based_recommender.data_loader import load_all_data
 
 app = FastAPI(title="Popco Recommender API", version="1.0.0")
 APP_ROOT_DIR = Path(__file__).parent # '/app'
 CSV_FILE_PATH = APP_ROOT_DIR / "data_processing"
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app.include_router(persona_recommender_router)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("메인 FastAPI 애플 시작: 모든 추천 시스템 데이터 초기화 시작.")
+    
+    try:
+        # data_loader의 load_all_data 함수를 직접 호출
+        # 이제 db_url 인자를 전달할 필요가 없습니다.
+        load_all_data() 
+        logger.info("추천 시스템 데이터 초기화 완료.")
+        yield
+    except Exception as e:
+        logger.error(f"추천 시스템 초기화 오류 발생: {e}", exc_info=True)
+        raise RuntimeError("추천 시스템 초기화 실패") from e
+
+
+app = FastAPI(title="POPCO Recommendation API", version="1.0.0", lifespan=lifespan)
 
 cached_movie_df = None
 cached_features = None
@@ -100,13 +130,36 @@ def init_popcorithm_csv():
     try:
         create_movie_metadata_csv()
         return {"message": "서버에 movie_metadata.csv 파일 생성을 성공적으로 완료했습니다."}
+        query = text("""
+            SELECT
+                c.id, c.title, c.overview, c.type,
+                GROUP_CONCAT(g.name ORDER BY g.name SEPARATOR ', ') AS genres
+            FROM content c
+            LEFT JOIN content_genre_ids cg ON c.id = cg.content_id
+            LEFT JOIN genre g ON cg.genre_id = g.id
+            WHERE c.id = 11
+            GROUP BY c.id, c.title, c.overview, c.type
+        """)
 
-    except  Exception as e:
+        result = db.execute(query).first()
+        if result:
+            result_dict = {
+                "id": result.id,
+                "title": result.title,
+                "overview": result.overview,
+                "type": result.type,
+                "genres": result.genres
+            }
+            return {"status": "Database connection successful", "data": result_dict}
+        else:
+            return {"status": "Database connection successful", "data": "No content found for ID 11."}
+    except Exception as e:
         traceback.print_exc()  # 자바의 printStackTrace와 동일
         
         # 스택 트레이스를 문자열로 가져오기
         error_details = traceback.format_exc()
         raise HTTPException(status_code=500, detail=f"파일 생성 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
         
 @app.get("/recommends/popcorithms/users/{userId}/limits/{limit}", tags=["추천 알고리즘"])
 def recommends_by_popcorithm(user_id: int, limit: int):
