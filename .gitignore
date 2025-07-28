@@ -11,3 +11,5 @@ __pycache__/
 # IDEs
 .idea/
 .vscode/
+
+/app/data_processing/popcorithm_with_vectors.csv

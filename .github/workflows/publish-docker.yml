@@ -1,13 +1,13 @@
-name: Fast Docker Build
+name: CI & CD
 
 on:
   push:
     branches: [ "dev" ]
-  pull_request:
-    branches: [ "dev" ]
+  # pull_request:
+  #   branches: [ "dev" ]
 
 jobs:
-  docker-build:
+  docker-build-push:
     runs-on: ubuntu-latest
     
     steps:
@@ -15,75 +15,172 @@ jobs:
       
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      
-    # 진짜 전역 캐시 (모든 브랜치가 공유)
-    - name: Cache Docker layers
-      uses: actions/cache@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
       with:
-        path: /tmp/.buildx-cache
-        key: ${{ runner.os }}-docker-universal-cache
-        restore-keys: |
-          ${{ runner.os }}-docker-universal-cache
-          
-    # 의존성 변경 감지 (코드만 바뀌면 스킵)
-    - name: Check if rebuild needed
-      id: check-rebuild
-      run: |
-        # Dockerfile이나 requirements.txt가 바뀌었는지 확인
-        if [ "${{ github.event_name }}" == "pull_request" ]; then
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-        else
-          BASE_SHA="${{ github.event.before }}"
-          HEAD_SHA="${{ github.sha }}"
-        fi
-        
-        if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|Dockerfile)"; then
-          echo "rebuild=true" >> $GITHUB_OUTPUT
-          echo "🔄 Docker dependencies changed - full rebuild needed"
-        else
-          echo "rebuild=false" >> $GITHUB_OUTPUT
-          echo "⚡ Only code changed - using cached layers"
-        fi
-        
-    # 빠른 빌드 (캐시 최대 활용)
-    - name: Build Docker image
-      uses: docker/build-push-action@v5
+        registry: docker.io
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build & Push
+      uses: docker/build-push-action@v4
       with:
         context: .
-        push: false
-        tags: popco-recommended:latest
-        cache-from: type=local,src=/tmp/.buildx-cache
-        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-        load: true
+        file: ./Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/popco-recommend:${{ github.sha }}
+          ${{ secrets.DOCKER_USERNAME }}/popco-recommend:latest
+
+    - uses: actions/checkout@v4
+
+    - name: Set up SSH agent
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
         
-    # 캐시 최적화 (중요!)
-    - name: Move cache
+    - name: Deploy to EC2
+      env:
+        SSH_USER: ${{ secrets.SSH_USER }}
+        SSH_HOST: ${{ secrets.SSH_HOST }}
       run: |
-        rm -rf /tmp/.buildx-cache
-        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'EOF'
+          set -e
+          echo "=== Popco-Recommended 배포 시작 ==="
+          cd ~/Popco-Recommended
+          # .env 파일 확인
+          if [ ! -f .env ]; then
+            echo "ERROR: .env 파일이 없습니다!"
+            exit 1
+          fi
+          # 기존 컨테이너 중지 및 제거
+          echo "1. 기존 컨테이너 중지..."
+          docker-compose -f docker-compose-prod.yml down
+          # 이미지 pull
+          echo "2. 최신 이미지 가져오기..."
+          docker-compose -f docker-compose-prod.yml pull
+          # 컨테이너 시작
+          echo "3. 새 컨테이너 시작..."
+          docker-compose -f docker-compose-prod.yml up -d
+          # 헬스체크
+          echo "4. 서비스 상태 확인..."
+          sleep 10
+          docker-compose -f docker-compose-prod.yml ps
+          # 로그 확인
+          echo "5. 초기 로그 확인..."
+          docker-compose -f docker-compose-prod.yml logs --tail=50
+          echo "=== 배포 완료 ==="
+        EOF
         
-    # 초간단 검증 (1초 이내)
-    - name: Quick verification
+    - name: Health Check
       run: |
-        echo "🚀 Quick Docker verification..."
-        if docker images popco-recommended:latest | grep -q popco-recommended; then
-          echo "✅ Docker image exists"
-        else
-          echo "❌ Docker image not found"
-          exit 1
-        fi
-        echo "✅ Verification completed in seconds!"
+        sleep 30
+        echo "서비스 헬스체크..."
+
+        # Recommend 서비스 체크
+        curl -f http://${{ secrets.SSH_HOST }}:8000/actuator/health || echo "Recommend 서비스 헬스체크 실패"
+
+    # - name: Login to Docker Hub
+    #   uses: docker/login-action@v3
+    #   with:
+    #     username: ${{ secrets.DOCKER_USERNAME }}
+    #     password: ${{ secrets.DOCKER_PASSWORD }}
+      
+    # # 진짜 전역 캐시 (모든 브랜치가 공유)
+    # - name: Cache Docker layers
+    #   uses: actions/cache@v3
+    #   with:
+    #     path: /tmp/.buildx-cache
+    #     key: ${{ runner.os }}-docker-universal-cache
+    #     restore-keys: |
+    #       ${{ runner.os }}-docker-universal-cache
+          
+    # # 의존성 변경 감지 (코드만 바뀌면 스킵)
+    # - name: Check if rebuild needed
+    #   id: check-rebuild
+    #   run: |
+    #     # Dockerfile이나 requirements.txt가 바뀌었는지 확인
+    #     if [ "${{ github.event_name }}" == "pull_request" ]; then
+    #       BASE_SHA="${{ github.event.pull_request.base.sha }}"
+    #       HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+    #     else
+    #       BASE_SHA="${{ github.event.before }}"
+    #       HEAD_SHA="${{ github.sha }}"
+    #     fi
         
-    # 성능 리포트
-    - name: Performance Summary
-      run: |
-        echo "## Fast Docker Build Results ⚡" >> $GITHUB_STEP_SUMMARY
-        if [ "${{ steps.check-rebuild.outputs.rebuild }}" == "true" ]; then
-          echo "- **Build Type**: 🔄 Full rebuild (dependencies changed)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Expected Time**: ~5-7 minutes" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "- **Build Type**: ⚡ Cache-optimized (code only)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Expected Time**: ~1-2 minutes" >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "- **Status**: ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+    #     if git diff --name-only $BASE_SHA $HEAD_SHA | grep -E "(requirements\.txt|Dockerfile)"; then
+    #       echo "rebuild=true" >> $GITHUB_OUTPUT
+    #       echo "🔄 Docker dependencies changed - full rebuild needed"
+    #     else
+    #       echo "rebuild=false" >> $GITHUB_OUTPUT
+    #       echo "⚡ Only code changed - using cached layers"
+    #     fi
+        
+    # - name: Build and push
+    #   uses: docker/build-push-action@v5
+    #   with:
+    #     context: .
+    #     push: true
+    #     tags: |
+    #       ${{ secrets.DOCKER_USERNAME }}/popco-recommend:latest
+    #       ${{ secrets.DOCKER_USERNAME }}/popco-recommend:${{ github.sha }}
+    #     cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/popco-recommend:buildcache
+    #     cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/popco-recommend:buildcache,mode=max
+        
+    # # 캐시 최적화 (중요!)
+    # - name: Move cache
+    #   run: |
+    #     rm -rf /tmp/.buildx-cache
+    #     mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  # deploy:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+
+  #     - name: Set up SSH agent
+  #       uses: webfactory/ssh-agent@v0.9.0
+  #       with:
+  #         ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+  #     - name: Deploy to EC2
+  #       env:
+  #         SSH_USER: ${{ secrets.SSH_USER }}
+  #         SSH_HOST: ${{ secrets.SSH_HOST }}
+  #       run: |
+  #         ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'EOF'
+  #           set -e
+  #           echo "=== Popco-Recommended 배포 시작 ==="
+  #           cd ~/Popco-Recommended
+  #           # .env 파일 확인
+  #           if [ ! -f .env ]; then
+  #             echo "ERROR: .env 파일이 없습니다!"
+  #             exit 1
+  #           fi
+  #           # 기존 컨테이너 중지 및 제거
+  #           echo "1. 기존 컨테이너 중지..."
+  #           docker-compose -f docker-compose-prod.yml down
+  #           # 이미지 pull
+  #           echo "2. 최신 이미지 가져오기..."
+  #           docker-compose -f docker-compose-prod.yml pull
+  #           # 컨테이너 시작
+  #           echo "3. 새 컨테이너 시작..."
+  #           docker-compose -f docker-compose-prod.yml up -d
+  #           # 헬스체크
+  #           echo "4. 서비스 상태 확인..."
+  #           sleep 10
+  #           docker-compose -f docker-compose-prod.yml ps
+  #           # 로그 확인
+  #           echo "5. 초기 로그 확인..."
+  #           docker-compose -f docker-compose-prod.yml logs --tail=50
+  #           echo "=== 배포 완료 ==="
+  #         EOF
+
+  #     - name: Health Check
+  #       run: |
+  #         sleep 30
+  #         echo "서비스 헬스체크..."
+  
+  #         # Recommend 서비스 체크
+  #         curl -f http://${{ secrets.SSH_HOST }}:8000/actuator/health || echo "Recommend 서비스 헬스체크 실패"
