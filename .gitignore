@@ -12,6 +12,6 @@ __pycache__/
 .idea/
 .vscode/
 
-/app/data_processing/popcorithm_with_vectors.csv
+app/data_processing/*
 .env.docker
 .env.local
