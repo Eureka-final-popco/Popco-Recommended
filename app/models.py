@@ -1,10 +1,10 @@
 from enum import Enum
-from sqlalchemy import Column, Integer, String, Float, DateTime, BigInteger, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, BigInteger, ForeignKey, Boolean, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Date, Numeric
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy.schema import PrimaryKeyConstraint
-from .database import Base
+from database import Base
 
 class User(Base):
     __tablename__ = "users"
@@ -87,3 +87,97 @@ class Review(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
     user = relationship("User", back_populates="reviews")
+
+class Content(Base):
+    __tablename__ = "contents"
+
+    id = Column(BigInteger, primary_key=True)
+    type = Column(String(255), primary_key=True)
+    title = Column(String(255), nullable=False)
+    overview = Column(Text, nullable=True)
+    runtime = Column(Integer, nullable=True)
+    rating_average = Column(Numeric(38, 2), nullable=True)
+    rating_count = Column(BigInteger, nullable=True)
+    release_date = Column(Date, nullable=True)
+    backdrop_path = Column(String(255), nullable=True)
+    poster_path = Column(String(255), nullable=True)
+
+    recommended_by = relationship(
+        "ContentRecommendation",
+        foreign_keys="[ContentRecommendation.source_content_id, ContentRecommendation.source_content_type]",
+        back_populates="source_content"
+    )
+    recommended_to = relationship(
+        "ContentRecommendation",
+        foreign_keys="[ContentRecommendation.recommended_content_id, ContentRecommendation.recommended_content_type]",
+        back_populates="recommended_content"
+    )
+
+
+class ContentRecommendation(Base):
+    __tablename__ = "content_recommendations"
+
+    source_content_id = Column(BigInteger, nullable=False)
+    source_content_type = Column(String(255), nullable=False)
+    recommended_content_id = Column(BigInteger, nullable=False)
+    recommended_content_type = Column(String(255), nullable=False)
+
+    ranking = Column(Integer, nullable=False)
+    score = Column(Float(precision=4), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            'source_content_id',
+            'source_content_type',
+            'recommended_content_id',
+            'recommended_content_type'
+        ),
+        ForeignKeyConstraint(
+            ['source_content_id', 'source_content_type'],
+            ['contents.id', 'contents.type'],
+            ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ['recommended_content_id', 'recommended_content_type'],
+            ['contents.id', 'contents.type'],
+            ondelete="CASCADE"
+        ),
+    )
+
+    source_content = relationship(
+        "Content",
+        foreign_keys=[source_content_id, source_content_type],
+        back_populates="recommended_by"
+    )
+    recommended_content = relationship(
+        "Content",
+        foreign_keys=[recommended_content_id, recommended_content_type],
+        back_populates="recommended_to"
+    )
+
+class PopularContent(Base):
+    __tablename__ = "popular_contents"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    content_id = Column(BigInteger, nullable=False)
+    content_type = Column(String(255), nullable=False)
+
+    like_count = Column(BigInteger, nullable=True)
+    ranked_date = Column(Date, nullable=False)
+    ranking = Column(Integer, nullable=False)
+    batch_type = Column(String(255), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['content_id', 'content_type'],
+            ['contents.id', 'contents.type'],
+            ondelete="CASCADE"
+        ),
+    )
+
+    content = relationship(
+        "Content",
+        primaryjoin="and_(PopularContent.content_id == Content.id, PopularContent.content_type == Content.type)",
+        backref="popular_entries"
+    )
