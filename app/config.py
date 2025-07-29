@@ -1,6 +1,20 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
 import os, sys
+import logging
+
+# 로거 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 디버깅 로그
+logger.info("=== 환경변수 디버깅 ===")
+logger.info(f"AWS_S3_BUCKET_NAME: {os.getenv('AWS_S3_BUCKET_NAME')}")
+logger.info(f"AWS_ACCESS_KEY_ID: {os.getenv('AWS_ACCESS_KEY_ID')}")
+logger.info(f"DB_HOST: {os.getenv('DB_HOST')}")
+logger.info(f"현재 디렉토리: {os.getcwd()}")
+logger.info(f".env 파일 존재: {os.path.exists('.env')}")
+
 
 class Settings(BaseSettings):
     DB_HOST: str
