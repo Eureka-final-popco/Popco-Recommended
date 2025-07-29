@@ -4,7 +4,10 @@ import os, sys
 import logging
 
 # 로거 설정
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 logger = logging.getLogger(__name__)
 
 # 디버깅 로그
