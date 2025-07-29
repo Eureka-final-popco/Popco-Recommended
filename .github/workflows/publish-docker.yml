@@ -59,23 +59,6 @@ jobs:
           set -e
           echo "=== Popco-Recommended 배포 시작 ==="
           cd ~/Popco-Recommended
-          # .env 파일 생성
-         cat > .env << 'ENVEOF'
-        ENVIRONMENT=production
-        DOCKER_HUB=longnote/popco-recommend
-        IMAGE_TAG=latest
-
-        DB_HOST=${{ env.DB_HOST }}
-        DB_PORT=${{ env.DB_PORT }}
-        DB_NAME=${{ env.DB_NAME }}
-        DB_USERNAME=${{ env.DB_USERNAME }}
-        DB_PASSWORD=${{ env.DB_PASSWORD }}
-
-        AWS_S3_BUCKET_NAME=${{ env.AWS_S3_BUCKET_NAME }}
-        AWS_S3_REGION=${{ env.AWS_S3_REGION }}
-        AWS_ACCESS_KEY_ID=${{ env.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY=${{ env.AWS_SECRET_ACCESS_KEY }}
-        ENVEOF
         
           # .env 파일 확인
           if [ ! -f .env ]; then
