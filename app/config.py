@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     AWS_S3_REGION: str
     AWS_ACCESS_KEY_ID: str
     AWS_SECRET_ACCESS_KEY: str
+
+    ENVIRONMENT: Optional[str] = None
+    DOCKER_HUB: Optional[str] = None
+    IMAGE_TAG: Optional[str] = None
     
     class Config:
         # 환경 우선순위: ENVIRONMENT > DOCKER_ENV > 기본값
