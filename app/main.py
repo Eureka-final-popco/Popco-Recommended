@@ -37,12 +37,12 @@ from app.persona_based_recommender.persona_router import persona_recommender_rou
 from app.persona_based_recommender.data_loader import load_all_data
 
 APP_ROOT_DIR = Path(__file__).parent # '/app'
-S3_BUCKET_NAME = settings.AWS_S3_BUCKET_NAME
+S3_BUCKET_NAME = settings.MY_AWS_S3_BUCKET_NAME
 s3 = boto3.client(
     's3',
-    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-    region_name=settings.AWS_S3_REGION
+    aws_access_key_id=settings.MY_AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=settings.MY_AWS_SECRET_ACCESS_KEY,
+    region_name=settings.MY_AWS_S3_REGION
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

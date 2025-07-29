@@ -23,10 +23,10 @@ class Settings(BaseSettings):
     DB_PASSWORD: str
     DB_NAME: str
 
-    AWS_S3_BUCKET_NAME: str
-    AWS_S3_REGION: str
-    AWS_ACCESS_KEY_ID: str
-    AWS_SECRET_ACCESS_KEY: str
+    MY_AWS_S3_BUCKET_NAME: str
+    MY_AWS_S3_REGION: str
+    MY_AWS_ACCESS_KEY_ID: str
+    MY_AWS_SECRET_ACCESS_KEY: str
 
     ENVIRONMENT: Optional[str] = None
     DOCKER_HUB: Optional[str] = None
