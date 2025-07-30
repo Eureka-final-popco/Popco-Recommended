@@ -1,4 +1,4 @@
-ervices:
+services:
   popco-recommend:
     image: ${DOCKER_HUB}/popco-recommend:${IMAGE_TAG:-latest}
     container_name: popco-recommend
