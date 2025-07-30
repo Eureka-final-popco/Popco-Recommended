@@ -30,11 +30,11 @@ def extract_all_features(df):
                     director_count[director.strip()] += 1
     
     # 2단계: 상위 N명만 선택
-    top_actors = sorted(actor_count.items(), key=lambda x: x[1], reverse=True)[:15000]  # 상위 1000명
+    top_actors = sorted(actor_count.items(), key=lambda x: x[1], reverse=True)[:15000]  # 상위 15000
     top_directors = sorted(director_count.items(), key=lambda x: x[1], reverse=True)[:1000]  # 상위 500명
     
     print(f"\n=== 특성 제한 결과 ===")
-    print(f"전체 배우: {len(actor_count)}명 → 상위 25000명 선택")
+    print(f"전체 배우: {len(actor_count)}명 → 상위 15000 선택")
     print(f"전체 감독: {len(director_count)}명 → 상위 1000명 선택")
     print(f"상위 배우 예시: {[actor for actor, count in top_actors[:5]]}")
     print(f"상위 감독 예시: {[director for director, count in top_directors[:5]]}")
@@ -217,6 +217,139 @@ def create_movie_metadata_csv():
         print(csv_df[['movie_id','type', 'title', 'poster_path', 'genres', 'actors', 'directors']].head())
         
         return csv_df
+        
+    except Exception as e:
+        print(f"오류 발생: {e}")
+        traceback.print_exc()
+        error_details = traceback.format_exc()
+        print(f"\n문자열 형태:\n{error_details}")
+        raise e
+        
+    finally:
+        connection.close()
+
+def create_metadata_only_csv():
+    """
+    DB에서 영화 메타데이터만 추출해서 CSV로 저장 (벡터 계산 없음)
+    """
+    settings = Settings()
+
+    connection = pymysql.connect(
+        host=settings.DB_HOST,
+        port=settings.DB_PORT,
+        database=settings.DB_NAME,
+        user=settings.DB_USERNAME,
+        password=settings.DB_PASSWORD,
+        charset='utf8mb4'
+    )
+    
+    # 영화 메타데이터 추출 쿼리 (기존과 동일)
+    query = """
+    SELECT 
+        c.id as movie_id,
+        c.title,
+        c.type,
+        c.poster_path,
+        
+        -- 장르 정보 (JSON 형태로 집계)
+        COALESCE(
+            JSON_ARRAYAGG(
+                CASE WHEN g.name IS NOT NULL 
+                THEN g.name 
+                ELSE NULL END
+            ), 
+            JSON_ARRAY()
+        ) as genres,
+        
+        -- 주연배우 정보 (상위 5명, JSON 형태)
+        (SELECT COALESCE(
+            JSON_ARRAYAGG(a.name), 
+            JSON_ARRAY()
+        )
+         FROM cast_members cm 
+         JOIN actors a ON cm.actor_id = a.id 
+         WHERE cm.content_id = c.id 
+           AND cm.type = c.type 
+         ORDER BY cm.cast_order ASC 
+         LIMIT 5
+        ) as main_actors,
+        
+        -- 감독 정보 (JSON 형태)
+        (SELECT COALESCE(
+            JSON_ARRAYAGG(crew.name), 
+            JSON_ARRAY()
+        )
+         FROM crews cr 
+         JOIN crew_members crew ON cr.crew_member_id = crew.id 
+         WHERE cr.content_id = c.id 
+           AND cr.type = c.type 
+           AND cr.job = 'Director'
+           LIMIT 1
+        ) as directors
+        
+    FROM contents c
+    LEFT JOIN content_genres cg ON c.id = cg.content_id AND c.type = cg.content_type
+    LEFT JOIN genres g ON cg.genre_id = g.id
+    GROUP BY c.id, c.title, c.type, c.poster_path
+    ORDER BY c.id
+    """
+    
+    try:
+        print("1단계: DB에서 영화 메타데이터 조회 중...")
+        df = pd.read_sql(query, connection)
+        
+        # JSON 문자열을 파이썬 리스트로 변환
+        def parse_json_column(json_str):
+            if pd.isna(json_str):
+                return []
+            try:
+                return json.loads(json_str)
+            except:
+                return []
+        
+        df['genres'] = df['genres'].apply(parse_json_column)
+        df['main_actors'] = df['main_actors'].apply(parse_json_column)
+        df['directors'] = df['directors'].apply(parse_json_column)
+        
+        # 리스트를 문자열로 변환 (CSV 저장용)
+        df['genres_str'] = df['genres'].apply(lambda x: ','.join([genre for genre in x if genre is not None]) if x else '')
+        df['actors_str'] = df['main_actors'].apply(lambda x: ','.join(x) if x else '')
+        df['directors_str'] = df['directors'].apply(lambda x: ','.join(x) if x else '')
+        
+        # 순수 메타데이터용 컬럼 선택 (벡터 없음!)
+        metadata_df = df[['movie_id', 'type', 'title', 'poster_path', 'genres_str', 'actors_str', 'directors_str']].copy()
+        metadata_df.columns = ['movie_id', 'type', 'title', 'poster_path', 'genres', 'actors', 'directors']
+        
+        print(f"2단계: {len(metadata_df)}개 영화 메타데이터 추출 완료")
+        
+        # NaN을 빈 문자열로 처리 (Pydantic 오류 방지)
+        metadata_df['poster_path'] = metadata_df['poster_path'].fillna('')
+        metadata_df['type'] = metadata_df['type'].fillna('movie')
+        metadata_df['title'] = metadata_df['title'].fillna('')
+        metadata_df['genres'] = metadata_df['genres'].fillna('')
+        metadata_df['actors'] = metadata_df['actors'].fillna('')
+        metadata_df['directors'] = metadata_df['directors'].fillna('')
+        
+        print("3단계: NaN 값 정리 완료")
+        
+        # 순수 메타데이터 CSV 저장
+        csv_filename = 'popcorithm_contents_metadata.csv'
+        metadata_df.to_csv(csv_filename, index=False, encoding='utf-8')
+        
+        # 파일 크기 확인
+        import os
+        file_size_mb = os.path.getsize(csv_filename) / (1024 * 1024)
+        
+        print(f"\n=== 순수 메타데이터 생성 완료 ===")
+        print(f"총 {len(metadata_df)}개 영화 메타데이터를 저장했습니다.")
+        print(f"파일명: {csv_filename}")
+        print(f"파일 크기: {file_size_mb:.2f} MB")
+        print("벡터 계산 없이 빠른 생성 완료!")
+        
+        print("\n샘플 데이터:")
+        print(metadata_df[['movie_id', 'type', 'title', 'poster_path', 'genres', 'actors', 'directors']].head())
+        
+        return metadata_df
         
     except Exception as e:
         print(f"오류 발생: {e}")

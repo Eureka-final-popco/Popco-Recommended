@@ -45,59 +45,65 @@ jobs:
         SSH_USER: ${{ secrets.SSH_USER }}
         SSH_HOST: ${{ secrets.SSH_HOST }}
         # 환경변수들
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
-        AWS_S3_REGION: ${{ secrets.AWS_S3_REGION }}
+        MY_AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        MY_AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        MY_AWS_S3_BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+        MY_AWS_S3_REGION: ${{ secrets.AWS_S3_REGION }}
         DB_HOST: ${{ secrets.DB_HOST }}
         DB_PORT: ${{ secrets.DB_PORT }}
         DB_NAME: ${{ secrets.DB_NAME }}
         DB_USERNAME: ${{ secrets.DB_USERNAME }}
         DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
       run: |
-        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'EOF'
+        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} 
+         MY_AWS_ACCESS_KEY_ID="${MY_AWS_ACCESS_KEY_ID}" \
+         MY_AWS_SECRET_ACCESS_KEY="${MY_AWS_SECRET_ACCESS_KEY}" \
+         MY_AWS_S3_BUCKET_NAME="${MY_AWS_S3_BUCKET_NAME}" \
+         MY_AWS_S3_REGION="${MY_AWS_S3_REGION}" \
+         DB_HOST="${DB_HOST}" \
+         DB_PORT="${DB_PORT}" \
+         DB_NAME="${DB_NAME}" \
+         DB_USERNAME="${DB_USERNAME}" \
+         DB_PASSWORD="${DB_PASSWORD}" \
+        << 'EOF'
           set -e
           echo "=== Popco-Recommended 배포 시작 ==="
           cd ~/Popco-Recommended
-          # .env 파일 생성
-         cat > .env << 'ENVEOF'
-        ENVIRONMENT=production
-        DOCKER_HUB=longnote/popco-recommend
-        IMAGE_TAG=latest
 
-        DB_HOST=${{ env.DB_HOST }}
-        DB_PORT=${{ env.DB_PORT }}
-        DB_NAME=${{ env.DB_NAME }}
-        DB_USERNAME=${{ env.DB_USERNAME }}
-        DB_PASSWORD=${{ env.DB_PASSWORD }}
-
-        AWS_S3_BUCKET_NAME=${{ env.AWS_S3_BUCKET_NAME }}
-        AWS_S3_REGION=${{ env.AWS_S3_REGION }}
-        AWS_ACCESS_KEY_ID=${{ env.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY=${{ env.AWS_SECRET_ACCESS_KEY }}
-        ENVEOF
+          # Git pull
+          echo "1. 최신 코드 가져오기..."
+          git pull origin dev
         
           # .env 파일 확인
           if [ ! -f .env ]; then
             echo "ERROR: .env 파일이 없습니다!"
             exit 1
           fi
+
+          # 환경변수 확인 (디버깅용)
+          echo "환경변수 확인: MY_AWS_S3_REGION=$MY_AWS_S3_BUCKET_NAME"
+
           # 기존 컨테이너 중지 및 제거
           echo "1. 기존 컨테이너 중지..."
           docker-compose -f docker-compose-prod.yml down
+
           # 이미지 pull
           echo "2. 최신 이미지 가져오기..."
           docker-compose -f docker-compose-prod.yml pull
+
           # 컨테이너 시작
           echo "3. 새 컨테이너 시작..."
           docker-compose -f docker-compose-prod.yml up -d
+
           # 헬스체크
           echo "4. 서비스 상태 확인..."
           sleep 10
           docker-compose -f docker-compose-prod.yml ps
+
           # 로그 확인
           echo "5. 초기 로그 확인..."
           docker-compose -f docker-compose-prod.yml logs --tail=50
+          
           echo "=== 배포 완료 ==="
         EOF
         
