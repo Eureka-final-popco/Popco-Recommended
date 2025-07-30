@@ -55,7 +55,7 @@ s3 = boto3.client(
     region_name=settings.MY_AWS_S3_REGION
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 cached_movie_df = None
