@@ -1,13 +1,9 @@
 import mysql.connector
 from mysql.connector import Error
-from popcorithm.models import MovieRecommendation, RecommendationResponse
 from typing import List, Dict, Optional
 from datetime import date
-import pymysql
-import pandas as pd
 from sqlalchemy.exc import OperationalError
 from config import settings
-from typing import Dict, Any, Optional
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 

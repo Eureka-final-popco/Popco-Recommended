@@ -3,7 +3,6 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, BigInteger, For
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from sqlalchemy.schema import PrimaryKeyConstraint
 from database import Base
 
 class User(Base):

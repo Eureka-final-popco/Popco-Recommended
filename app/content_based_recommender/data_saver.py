@@ -1,6 +1,5 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
-from pydantic import BaseModel
 from typing import List, Optional
 import traceback
 from datetime import date, timedelta
@@ -26,45 +25,6 @@ def get_top_ranked_content(session: Session, batch_type: str = None) -> tuple[in
             return top_content.content_id, top_content.content_type
 
     return None
-
-# def get_existing_recommendations(db: Session, source_content_id: int, source_content_type: str, user_id: int) -> List[ContentResponse]:
-#     """
-#     DB에서 기존 추천 데이터를 조회
-#     """
-#     try:
-#         # ranking 순서로 정렬하여 추천 데이터 조회
-#         recommendations = db.query(ContentRecommendation).join(
-#             Content,
-#             and_(
-#                 ContentRecommendation.recommended_content_id == Content.id,
-#                 ContentRecommendation.recommended_content_type == Content.type
-#             )
-#         ).filter(
-#             and_(
-#                 ContentRecommendation.source_content_id == source_content_id,
-#                 ContentRecommendation.source_content_type == source_content_type
-#             )
-#         ).order_by(ContentRecommendation.ranking).all()
-        
-#         if not recommendations:
-#             return []
-        
-#         # 응답 형태로 변환
-#         result = []
-#         for rec in recommendations:
-#             content_response = ContentResponse(
-#                 content_id=rec.recommended_content.id,
-#                 content_type=rec.recommended_content.type,
-#                 title=rec.recommended_content.title,
-#                 poster_path=rec.recommended_content.poster_path
-#             )
-#             result.append(content_response)
-        
-#         return result
-#     except Exception as e:
-#         print(f"DB 조회 중 오류 발생: {str(e)}")
-#         traceback.print_exc()
-#         return []
 
 def get_existing_recommendations(
     db: Session,
@@ -154,9 +114,8 @@ def save_recommendations_to_db(db: Session, source_content_id: int, source_conte
                     id=rec.content_id,
                     type=rec.content_type,
                     title=rec.title,
-                    overview=rec.overview
+                    # overview=rec.overview
                     # poster_path는 추천 시스템 결과에 포함되어 있지만 RecommendationResponse에는 없음
-                    # 필요하다면 별도로 추가 처리 필요
                 )
                 db.add(new_content)
             
