@@ -2,8 +2,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from typing import List, Optional
 import traceback
+from fastapi import HTTPException, status
 from datetime import date, timedelta
-from models import ContentRecommendation, Content, PopularContent, ContentReaction
+from models import ContentRecommendation, Content, PopularContent, ContentReaction, User
 from content_based_recommender.schemas import ContentResponse, ContentRecommendationListResponse, RecommendationListResponse
 
 def get_top_ranked_content(session: Session, batch_type: str = None) -> tuple[int, str] | None:
@@ -25,6 +26,21 @@ def get_top_ranked_content(session: Session, batch_type: str = None) -> tuple[in
             return top_content.content_id, top_content.content_type
 
     return None
+
+def check_user_exists(db: Session, user_id: Optional[int]) -> None:
+    """
+    user_id가 주어진 경우, DB에 해당 유저가 존재하는지 확인.
+    존재하지 않으면 HTTP 404 예외를 발생시킴.
+    """
+    if user_id is None:
+        return  # 비회원 → 검증 건너뜀
+
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"해당 user_id({user_id})를 가진 사용자가 존재하지 않습니다."
+        )
 
 def get_existing_recommendations(
     db: Session,

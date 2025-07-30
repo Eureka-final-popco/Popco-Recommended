@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     
     class Config:
         # 환경 우선순위: ENVIRONMENT > DOCKER_ENV > 기본값
-        env_file = ".env"  # 기본값
+        env_file = ".local.env"  # 기본값
         
         # def __init__(self):
             # AWS 배포 환경 (최우선)

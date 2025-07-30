@@ -28,7 +28,7 @@ from .schemas import InitialFeedbackRequest, FeedbackRequest, RecommendationResp
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-persona_recommender_router = APIRouter(prefix="/recommend/persona")
+persona_recommender_router = APIRouter(prefix="/recommends/personas")
 
 
 def calculate_and_store_user_personas(
