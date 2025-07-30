@@ -1,7 +1,7 @@
 import pymysql
 import pandas as pd
 import json
-from ..config import Settings
+from config import Settings
 import traceback
 from collections import defaultdict
 

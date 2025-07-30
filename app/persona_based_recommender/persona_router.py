@@ -7,8 +7,8 @@ from sqlalchemy import func, text
 from datetime import datetime
 
 # DB 모델 임포트
-from app.database import get_db, SQLALCHEMY_DATABASE_URL
-from app.models import ContentReaction, UserPersona, Review, ReactionType, User
+from database import get_db, SQLALCHEMY_DATABASE_URL
+from models import ContentReaction, UserPersona, Review, ReactionType, User
 
 # 내부 모듈 임포트
 from . import persona_generator
@@ -18,7 +18,7 @@ from .config import (
     MIN_POSITIVE_RATINGS_FOR_GROWTH,
     QA_INITIAL_RECOMMENDATION_THRESHOLD
 )
-from app.persona_based_recommender.persona_generator import (
+from persona_based_recommender.persona_generator import (
     calculate_user_content_matrix_sparse, 
     calculate_user_similarity,      
 )

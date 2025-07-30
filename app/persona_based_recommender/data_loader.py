@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from .state import pbr_app_state
-from app.database import SessionLocal
+from database import SessionLocal
 from .config import LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS
 
 logger = logging.getLogger(__name__)

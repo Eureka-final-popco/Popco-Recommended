@@ -25,7 +25,7 @@ from .config import (
     POSITIVE_FEEDBACK_THRESHOLD, RECOMMENDATION_COUNT
 )
 from .schemas import RecommendedContent
-from app.models import UserPersona, ContentReaction, Review, Persona, ReactionType # Persona 모델 임포트 필요
+from models import UserPersona, ContentReaction, Review, Persona, ReactionType # Persona 모델 임포트 필요
 
 # 로거 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

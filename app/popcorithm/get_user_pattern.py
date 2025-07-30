@@ -2,7 +2,7 @@ import mysql.connector
 import pandas as pd
 from typing import List, Dict
 from datetime import datetime
-from ..config import Settings
+from config import Settings
 
 def get_user_recent_activities(user_id: int, limit: int = 30) -> List[Dict]:
     """
