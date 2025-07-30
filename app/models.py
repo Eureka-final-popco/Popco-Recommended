@@ -66,6 +66,8 @@ class UserPersona(Base):
     user_id = Column(BigInteger, ForeignKey('users.user_id'), primary_key=True, index=True)
     persona_id = Column(BigInteger, ForeignKey('personas.persona_id'), primary_key=True, index=True)
     score = Column(Float)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
 
     user = relationship("User", back_populates="user_personas")
     persona = relationship("Persona", back_populates="user_personas")
