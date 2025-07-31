@@ -1,5 +1,3 @@
-# data_loader.py
-
 import logging
 import pandas as pd
 from typing import Dict, Any, List, Optional, Tuple
@@ -10,6 +8,16 @@ from database import SessionLocal
 from .config import LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS
 
 logger = logging.getLogger(__name__)
+
+PERSONA_EXCLUDED_GENRES_MAP = {
+    "액션헌터": ["가족", "키즈", "로맨스", "연속극", "토크", "음악", "다큐멘터리"], # 정적인 영화 싫어함
+    "무비 셜록": ["가족", "키즈", "로맨스", "음악", "리얼리티", "토크", "연속극"], # 정보/논리 중심, 가벼운 장르 선호 안함
+    "시네파 울보": ["공포", "스릴러", "액션", "SF", "범죄", "전쟁"], # 감정/감동 중심, 자극적 장르 제외
+    "온기 수집가": ["공포", "스릴러", "전쟁", "범죄", "액션"], # 자극적인 것 피함
+    "이세계 유랑자": ["리얼리티", "뉴스", "다큐멘터리", "로맨스", "토크", "연속극", "가족", "키즈"], # 현실 탈출, 상상력 중시
+    "무서워도본다맨": ["가족", "키즈", "로맨스", "음악", "리얼리티", "토크", "연속극"], # 공포/스릴 중심, 반대 장르 제외
+    "레트로 캡틴": ["액션", "SF", "판타지", "키즈", "리얼리티", "토크", "연속극"], # 고전/아날로그 감성 중시, 현대적/가벼운 장르 제외
+}
 
 def load_all_data():
     logger.info("모든 데이터 로드 시작...")
@@ -79,6 +87,12 @@ def load_all_data():
         pbr_app_state.genre_id_to_name_map = pd.Series(genres_df.name.values, index=genres_df.id).to_dict()
         pbr_app_state.genre_name_to_id_map = {v: k for k, v in pbr_app_state.genre_id_to_name_map.items()}
         logger.info(f"Genres 데이터 로드 완료: {len(genres_df)}개.")
+
+        # 페르소나 상세 정보 맵 생성 (변경 없음)
+        pbr_app_state.persona_id_to_name_map = pd.Series(persona_df.name.values, index=persona_df.persona_id).to_dict()
+        pbr_app_state.persona_name_to_id_map = {v: k for k, v in pbr_app_state.persona_id_to_name_map.items()}
+        # ⬆️ 이 줄 바로 뒤에 다음을 추가합니다.
+        logger.info(f"DEBUG: pbr_app_state.persona_name_to_id_map 초기화 완료: {pbr_app_state.persona_name_to_id_map}")
 
         # PersonaOptions 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM persona_options"))
@@ -213,11 +227,14 @@ def load_all_data():
                         best_option_row = q_data.loc[q_data['score'].idxmax()]
                         qa_mapping[str(q_id)] = str(best_option_row['content'])
 
+            current_excluded_genres = PERSONA_EXCLUDED_GENRES_MAP.get(persona_name, [])
+
             pbr_app_state.persona_details_map[persona_id] = {
                 'persona_name': persona_name,
                 'description': description,
                 'keywords': keywords,
-                'qa_mapping': qa_mapping
+                'qa_mapping': qa_mapping,
+                'excluded_genres': current_excluded_genres
             }
 
         logging.info("모든 데이터 로드 및 pbr_app_state 업데이트 완료.")

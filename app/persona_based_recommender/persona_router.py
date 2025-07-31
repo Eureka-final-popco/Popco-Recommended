@@ -20,7 +20,8 @@ from .config import (
 )
 from persona_based_recommender.persona_generator import (
     calculate_user_content_matrix_sparse, 
-    calculate_user_similarity,      
+    calculate_user_similarity,
+    calculate_and_store_user_personas      
 )
 from .schemas import InitialFeedbackRequest, FeedbackRequest, RecommendationResponse, RecommendedContent, PersonaCountsResponse
 
@@ -29,76 +30,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 persona_recommender_router = APIRouter(prefix="/recommends/personas")
-
-
-def calculate_and_store_user_personas(
-    db: Session,
-    user_id: int, # 단일 사용자 ID를 받도록 변경
-    calculated_persona_scores: Dict[str, float] # 계산된 페르소나 점수 딕셔너리를 받도록 변경
-):
-    """
-    주어진 사용자 ID에 대해 계산된 페르소나 점수를 DB 및 전역 상태를 업데이트합니다.
-    """
-    if pbr_app_state.contents_df is None or pbr_app_state.reactions_df is None:
-        logger.error("데이터 로드되지 않음. 페르소나 계산 불가.")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="추천 시스템 데이터가 로드되지 않았습니다.")
-
-    logger.info(f"사용자 [{user_id}]의 페르소나 점수 DB 및 상태 저장 시작.")
-
-    persona_name_to_id_map = pbr_app_state.persona_name_to_id_map
-    if persona_name_to_id_map is None or not persona_name_to_id_map:
-        logger.error("페르소나 이름-ID 매핑이 초기화되지 않았습니다. 페르소나 점수 저장 불가.")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="페르소나 매핑 데이터가 없습니다.")
-
-    new_user_persona_rows = []
-    for persona_name, score in calculated_persona_scores.items():
-        persona_id = persona_name_to_id_map.get(persona_name)
-        if persona_id is not None:
-            new_user_persona_rows.append({
-                'user_id': user_id,
-                'persona_id': persona_id,
-                'score': score,
-                'created_at': datetime.now(), # pd.Timestamp.now() 대신 datetime.now() 사용
-                'updated_at': datetime.now()
-            })
-    
-    if not new_user_persona_rows:
-        logger.warning(f"사용자 {user_id}에 대해 저장할 페르소나 점수가 없습니다.")
-        return
-
-    new_persona_scores_df = pd.DataFrame(new_user_persona_rows)
-
-    # pbr_app_state.all_user_personas_df 업데이트
-    if pbr_app_state.all_user_personas_df is not None and not pbr_app_state.all_user_personas_df.empty:
-        # 기존 사용자 페르소나 제거 (업데이트를 위해)
-        pbr_app_state.all_user_personas_df = pbr_app_state.all_user_personas_df[
-            pbr_app_state.all_user_personas_df['user_id'] != user_id
-        ]
-        pbr_app_state.all_user_personas_df = pd.concat([pbr_app_state.all_user_personas_df, new_persona_scores_df], ignore_index=True)
-    else:
-        pbr_app_state.all_user_personas_df = new_persona_scores_df
-
-    # DB에 저장 (upsert 로직)
-    for _, row in new_persona_scores_df.iterrows():
-        user_persona = db.query(UserPersona).filter_by(
-            user_id=int(row['user_id']),
-            persona_id=int(row['persona_id'])
-        ).first()
-
-        if user_persona:
-            user_persona.score = float(row['score'])
-            user_persona.updated_at = func.now()
-        else:
-            user_persona = UserPersona(
-                user_id=int(row['user_id']),
-                persona_id=int(row['persona_id']),
-                score=float(row['score']),
-                created_at=func.now(),
-                updated_at=func.now()
-            )
-            db.add(user_persona)
-    db.commit()
-    logger.info(f"DB/State: 사용자 [{user_id}]의 페르소나 점수 {len(new_persona_scores_df)}개 저장/업데이트 완료.")
 
 
 @persona_recommender_router.post("/onboard", response_model=RecommendationResponse, status_code=status.HTTP_200_OK)
@@ -159,7 +90,16 @@ async def onboard_user(
     if new_reactions:
         db.add_all(new_reactions)
         logger.info(f"DB: 사용자 {user_id}의 초기 콘텐츠 반응 {len(new_reactions)}개 저장 대기 중.")
+
+        try:
+            db.commit() # 초기 피드백을 DB에 먼저 저장합니다.
+            logger.info(f"DB: 사용자 {user_id}의 초기 콘텐츠 반응 {len(new_reactions)}개 DB에 저장 완료 (초기 커밋).")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"사용자 {user_id}의 초기 반응 저장 중 오류 발생: {e}", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="초기 피드백 저장 실패.")
         
+
         new_reactions_df_data = []
         for r in new_reactions:
             new_reactions_df_data.append({
@@ -167,8 +107,8 @@ async def onboard_user(
                 'content_id': r.content_id, # contentId_orig 대신 content_id 사용
                 'type': r.type,
                 'reaction': r.reaction.value,
-                'created_at': datetime.now(),
-                'updated_at': datetime.now()
+                # 'created_at': datetime.now(),
+                # 'updated_at': datetime.now()
             })
         new_reactions_df = pd.DataFrame(new_reactions_df_data)
 
@@ -320,10 +260,10 @@ async def submit_feedback(
             ).first()
             if existing_reaction:
                 existing_reaction.reaction = db_reaction_enum # <-- 중요: SQLEnum 필드에는 Enum 멤버를 직접 할당
-                existing_reaction.updated_at = func.now()
+                # existing_reaction.updated_at = func.now()
                 db.add(existing_reaction) # 변경사항을 세션에 다시 추가
             else:
-                db.add(ContentReaction(user_id=user_id, content_id=content_id, type=content_type, reaction=db_reaction_enum, created_at=datetime.utcnow())) # <-- 중요: SQLEnum 필드에는 Enum 멤버를 직접 할당
+                db.add(ContentReaction(user_id=user_id, content_id=content_id, type=content_type, reaction=db_reaction_enum)) # created_at 제거
             
             # pbr_app_state.reactions_df 업데이트 로직 (DataFrame 컬럼에는 보통 문자열 값을 저장)
             if pbr_app_state.reactions_df is not None:
@@ -332,12 +272,12 @@ async def submit_feedback(
                        (pbr_app_state.reactions_df['type'] == content_type)
                 if mask.any():
                     pbr_app_state.reactions_df.loc[mask, 'reaction'] = db_reaction_enum.value # <-- DataFrame에는 .value 사용
-                    pbr_app_state.reactions_df.loc[mask, 'updated_at'] = pd.Timestamp.now()
+                    # pbr_app_state.reactions_df.loc[mask, 'updated_at'] = pd.Timestamp.now()
                 else:
                     new_row_df = pd.DataFrame([{
                         'user_id': user_id, 'content_id': content_id, 'type': content_type,
                         'reaction': db_reaction_enum.value, # <-- DataFrame에는 .value 사용
-                        'created_at': pd.Timestamp.now(), 'updated_at': pd.Timestamp.now()
+                        # 'created_at': pd.Timestamp.now(), 'updated_at': pd.Timestamp.now()
                     }])
                     pbr_app_state.reactions_df = pd.concat([pbr_app_state.reactions_df, new_row_df], ignore_index=True)
             else:
@@ -358,7 +298,7 @@ async def submit_feedback(
             ).first()
             if existing_review:
                 existing_review.score = score
-                existing_review.updated_at = func.now()
+                # existing_review.updated_at = func.now()
                 db.add(existing_review) # 변경사항을 세션에 다시 추가
             else:
                 db.add(Review(
@@ -366,7 +306,7 @@ async def submit_feedback(
                     content_id=content_id,
                     type=content_type,
                     score=score,
-                    created_at=datetime.utcnow() # created_at 추가
+                    # created_at=datetime.utcnow() # created_at 추가
                 ))
             
             # pbr_app_state.reviews_df 업데이트 로직
@@ -376,14 +316,14 @@ async def submit_feedback(
                     (pbr_app_state.reviews_df['type'] == content_type)
                 if mask.any():
                     pbr_app_state.reviews_df.loc[mask, 'score'] = score
-                    pbr_app_state.reviews_df.loc[mask, 'updated_at'] = pd.Timestamp.now()
+                    # pbr_app_state.reviews_df.loc[mask, 'updated_at'] = pd.Timestamp.now()
                 else:
                     new_row_df = pd.DataFrame([{
                         'user_id': user_id, 'content_id': content_id, 'type': content_type,
                         'score': score,
                         'review_content': None, # 기본값
                         'like_count': 0, 'report_count': 0, 'review_status': 'COMMON', # 기본값
-                        'created_at': pd.Timestamp.now(), 'updated_at': pd.Timestamp.now()
+                        # 'created_at': pd.Timestamp.now(), 'updated_at': pd.Timestamp.now()
                     }])
                     pbr_app_state.reviews_df = pd.concat([pbr_app_state.reviews_df, new_row_df], ignore_index=True)
             else:
@@ -398,15 +338,19 @@ async def submit_feedback(
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="유효하지 않은 reaction_type입니다. '좋아요', '싫어요', '평점' 중 하나여야 합니다.")
 
-        # 2. 페르소나 재계산 및 DB/pbr_app_state 업데이트 (핵심 변경 부분)
-        # 피드백이 DB에 커밋된 후 페르소나 점수를 다시 계산하고 상태를 업데이트
-        persona_generator.update_user_persona_scores(user_id, db)
-        logger.info(f"사용자 {user_id}의 페르소나 점수 DB 및 메모리 상태 업데이트 요청 완료.")
-
         # 모든 DB 변경사항을 한 번에 커밋 (이것이 유일한 commit이어야 합니다!)
         db.commit()
         logger.info(f"DB: 사용자 {user_id} 피드백 및 페르소나 업데이트 관련 모든 변경사항 커밋 완료.")
 
+        # 2. 페르소나 재계산 및 DB/pbr_app_state 업데이트
+        # 이제 update_user_persona_scores는 방금 커밋된 최신 피드백을 DB에서 조회할 수 있습니다.
+        persona_generator.update_user_persona_scores(user_id, db)
+        logger.info(f"사용자 {user_id}의 페르소나 점수 DB 및 메모리 상태 업데이트 요청 완료.")
+
+        # 페르소나 점수 변경사항을 커밋 (이것이 유일한 commit이어야 합니다!)
+        # db.commit()
+        # logger.info(f"DB: 사용자 {user_id} 페르소나 업데이트 2차 커밋 완료.")
+        
     except Exception as e:
         db.rollback()
         logger.error(f"피드백 및 페르소나 업데이트 중 오류 발생: {e}", exc_info=True)
@@ -427,7 +371,7 @@ async def submit_feedback(
             user_id, num_recommendations=RECOMMENDATION_COUNT, db=db, content_type_filter=content_type
             # main_persona_genres=main_persona_genres, sub_persona_genres=sub_persona_genres # 제거
         )
-        recommendations.extend(recommendations)
+        # recommendations.extend(recommendations)
         logger.info(f"CF 추천 {len(recommendations)}개 추가됨. 현재 총 추천 수: {len(recommendations)}")
     
     # CF 추천이 없거나 불가능한 경우 페르소나 기반 폴백
@@ -476,9 +420,9 @@ async def get_user_recommendations(
 
     try:
         # 사용자 페르소나 및 점수 업데이트 (필요시, 요청마다 업데이트)
-        persona_generator.update_user_persona_scores(user_id, db)
-        logger.info(f"사용자 {user_id}의 최신 페르소나 점수를 DB에 업데이트 시도.")
-        db.commit() # 여기서도 commit 필요
+        # persona_generator.update_user_persona_scores(user_id, db)
+        # logger.info(f"사용자 {user_id}의 최신 페르소나 점수를 DB에 업데이트 시도.")
+        # db.commit() # 여기서도 commit 필요
 
         unified_feedback = persona_generator.generate_unified_user_feedback(user_id, db)
         main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores = \

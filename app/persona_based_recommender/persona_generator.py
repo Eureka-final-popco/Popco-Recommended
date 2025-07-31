@@ -1,6 +1,7 @@
 import logging
 import pandas as pd
 from scipy.sparse import csr_matrix, lil_matrix
+from fastapi import APIRouter, HTTPException, Depends, status, Query
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict
 from typing import Dict, List, Any, Tuple, Optional, Set
@@ -168,35 +169,73 @@ def calculate_and_store_user_personas(
     """
     계산된 사용자 페르소나 점수를 user_personas 테이블에 저장하거나 업데이트합니다.
     """
-    logger.info(f"사용자 [{user_id}]의 페르소나 점수 DB 및 상태 저장 시작.")
+    logger.info(f"사용자 [{user_id}]의 페르소나 점수 DB 및 상태 저장 시작 (Upsert 방식).")
 
     if not calculated_persona_scores:
-        logger.warning(f"사용자 {user_id}에 대해 저장할 페르소나 점수가 없습니다.")
+        logger.warning(f"사용자 {user_id}에 대해 저장할 페르소나 점수가 없습니다. 기존 페르소나도 삭제하지 않습니다.")
         return
 
-    # 기존 UserPersona 기록 삭제 (새로운 점수로 덮어쓰기 위해)
-    db.query(UserPersona).filter(UserPersona.user_id == user_id).delete(synchronize_session=False)
-    logger.info(f"사용자 {user_id}의 기존 페르소나 점수 {db.query(UserPersona).filter(UserPersona.user_id == user_id).count()}개 삭제 완료.")
+    current_utc_time = datetime.utcnow()
 
-    new_user_personas = []
-    for persona_id, score in calculated_persona_scores.items():
+    existing_user_personas = db.query(UserPersona).filter(UserPersona.user_id == user_id).all()
+    existing_personas_map = {up.persona_id: up for up in existing_user_personas}
+
+    personas_to_add_or_update = []
+    persona_ids_to_keep = set()
+
+    for persona_id, new_score in calculated_persona_scores.items():
         persona = db.query(Persona).filter(Persona.persona_id == persona_id).first()
-        if persona:
-            new_user_personas.append(
-                UserPersona(
-                    user_id=user_id,
-                    persona_id=persona_id,
-                    score=score
-                )
-            )
-        else:
+        if not persona:
             logger.warning(f"페르소나 ID {persona_id}를 찾을 수 없습니다. 해당 페르소나 점수는 저장되지 않습니다.")
+            continue
 
-    if new_user_personas:
-        db.add_all(new_user_personas)
-        logger.info(f"사용자 {user_id}의 새로운 페르소나 점수 {len(new_user_personas)}개 추가됨.")
+        persona_ids_to_keep.add(persona_id)
+
+        if persona_id in existing_personas_map:
+            # 기존 페르소나가 있다면 업데이트
+            user_persona = existing_personas_map[persona_id]
+            score_changed = (user_persona.score != new_score)
+
+            if score_changed:
+                user_persona.score = new_score
+                logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 점수 업데이트됨 ({user_persona.score} -> {new_score}).")
+            else:
+                logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 점수 변화 없음 ({new_score}).")
+
+            # --- 이 부분이 중요합니다! score_changed 조건문 밖으로 이동 ---
+            user_persona.updated_at = current_utc_time # 점수 변화와 상관없이 updated_at 갱신
+            personas_to_add_or_update.append(user_persona) # 변경사항을 세션에 추가
+            # --- 변경 끝 ---
+
+        else:
+            # 새로운 페르소나라면 삽입
+            new_user_persona = UserPersona(
+                user_id=user_id,
+                persona_id=persona_id,
+                score=new_score,
+                created_at=current_utc_time,
+                updated_at=current_utc_time
+            )
+            personas_to_add_or_update.append(new_user_persona)
+            logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 새로운 페르소나 점수 삽입됨 ({new_score}).")
+
+    personas_to_delete = [
+        up for up in existing_user_personas
+        if up.persona_id not in persona_ids_to_keep
+    ]
+
+    if personas_to_delete:
+        for ptd in personas_to_delete:
+            db.delete(ptd)
+        logger.info(f"사용자 {user_id}의 더 이상 유효하지 않은 페르소나 점수 {len(personas_to_delete)}개 삭제됨.")
+
+    if personas_to_add_or_update:
+        db.add_all(personas_to_add_or_update)
+        logger.info(f"사용자 {user_id}의 페르소나 점수 {len(personas_to_add_or_update)}개 업데이트/추가됨.")
     else:
-        logger.warning(f"사용자 {user_id}에 대해 저장할 유효한 새로운 페르소나 점수가 없습니다.")
+        logger.info(f"사용자 {user_id}의 페르소나 점수에 변경사항이 없거나 유효한 점수가 없어 업데이트/추가되지 않았습니다.")
+
+    logger.info(f"사용자 {user_id}의 페르소나 점수 DB 저장 완료 (Upsert 방식).")
 
 
 def calculate_user_similarity(user_item_matrix: csr_matrix, user_idx_to_id_map: Dict[int, int]) -> Tuple[pd.DataFrame, csr_matrix]:
@@ -342,11 +381,20 @@ def update_user_persona_scores(
     calculated_persona_scores_by_name = calculate_persona_scores_from_feedback(user_id, unified_feedback)
 
     # 3. 페르소나 이름 -> ID 매핑을 사용하여 ID 기반 딕셔너리 생성
-    calculated_persona_scores_by_id = {
-        pbr_app_state.persona_name_to_id_map[name]: score
-        for name, score in calculated_persona_scores_by_name.items()
-        if name in pbr_app_state.persona_name_to_id_map
-    }
+    calculated_persona_scores_by_id = {}
+    for name, score in calculated_persona_scores_by_name.items():
+        original_name = name # 원본 이름 로깅을 위해 저장
+        normalized_name = name.strip() # 추가: 이름의 양쪽 공백 제거
+
+        # 추가: 정규화된 이름과 매핑 존재 여부 로깅
+        if normalized_name in pbr_app_state.persona_name_to_id_map:
+            persona_id = pbr_app_state.persona_name_to_id_map[normalized_name]
+            calculated_persona_scores_by_id[persona_id] = score
+            logger.info(f"DEBUG: 페르소나 '{original_name}' (정규화: '{normalized_name}') -> ID {persona_id}로 성공적으로 매핑되었습니다.")
+        else:
+            logger.warning(f"경고: 페르소나 이름 '{original_name}' (정규화: '{normalized_name}')이(가) pbr_app_state.persona_name_to_id_map에서 찾아지지 않았습니다.")
+            # 추가: pbr_app_state.persona_name_to_id_map의 현재 키 목록을 출력하여 비교
+            logger.warning(f"DEBUG: pbr_app_state.persona_name_to_id_map의 현재 키: {list(pbr_app_state.persona_name_to_id_map.keys())}")
 
     # 4. DB 및 pbr_app_state에 페르소나 점수 저장 (기존 로직)
     # 이제 이 함수가 calculate_persona_scores_from_feedback에서 계산된 점수를 사용합니다.
@@ -393,37 +441,62 @@ def generate_unified_user_feedback(user_id: int, db: Session) -> Dict[Tuple[int,
     ContentReaction 및 Review 객체에는 'content_id' 필드가 있다고 가정합니다.
     """
     logger.info(f"사용자 {user_id}의 통합 피드백 생성 중...")
-    unified_feedback: Dict[int, float] = defaultdict(float)
+    
+    # unified_feedback의 초기화 타입을 반환 타입과 일치시킵니다.
+    unified_feedback: Dict[Tuple[int, str], float] = defaultdict(float) 
 
     # 1. 좋아요/싫어요 반응 처리
     reactions = db.query(ContentReaction).filter(ContentReaction.user_id == user_id).all()
     for reaction in reactions:
-        key = (reaction.content_id, reaction.type)
+        key = (reaction.content_id, reaction.type) # 이미 튜플 키를 사용 중
         if reaction.reaction == ReactionType.LIKE:
             unified_feedback[key] += LIKE_WEIGHT
         elif reaction.reaction == ReactionType.DISLIKE:
-            unified_feedback[key] += DISLIKE_WEIGHT # DISLIKE_WEIGHT는 음수 값으로 설정 가정
+            unified_feedback[key] += DISLIKE_WEIGHT
     logger.info(f"ContentReaction {len(reactions)}개 처리 완료.")
 
     # 2. 리뷰(별점) 처리
     reviews = db.query(Review).filter(Review.user_id == user_id).all()
     for review in reviews:
-        key = (review.content_id, review.type)
+        key = (review.content_id, review.type) # 이미 튜플 키를 사용 중
         score = STAR_RATING_WEIGHTS.get(review.score, 0.0)
         unified_feedback[key] += score
     logger.info(f"Review {len(reviews)}개 처리 완료.")
 
-    # 3. QA 답변 데이터 처리 (pbr_app_state.user_qa_answers_df 사용)
-    if pbr_app_state.user_qa_answers_df is not None and not pbr_app_state.user_qa_answers_df.empty:
-        user_qa_df = pbr_app_state.user_qa_answers_df[pbr_app_state.user_qa_answers_df['user_id'] == user_id]
-        for _, row in user_qa_df.iterrows():
-            qa_content_id = row.get('content_id') # user_qa_answers_df의 'content_id' 컬럼
-            qa_score = row.get('score')
-            if qa_content_id is not None and qa_score is not None:
-                unified_feedback[qa_content_id] += qa_score * QA_WEIGHT
-
+    # # 3. QA 답변 데이터 처리 (pbr_app_state.user_qa_answers_df 사용)
+    # if pbr_app_state.user_qa_answers_df is not None and not pbr_app_state.user_qa_answers_df.empty:
+    #     user_qa_df = pbr_app_state.user_qa_answers_df[pbr_app_state.user_qa_answers_df['user_id'] == user_id]
+        
+    #     # contents_df가 로드되어 있어야 content_type을 찾을 수 있습니다.
+    #     if pbr_app_state.contents_df.empty:
+    #         logger.warning("QA 답변 처리를 위해 pbr_app_state.contents_df가 비어 있습니다. QA 점수가 반영되지 않을 수 있습니다.")
+        
+    #     for _, row in user_qa_df.iterrows():
+    #         qa_content_id = row.get('content_id')
+    #         qa_score = row.get('score')
+            
+    #         if qa_content_id is not None and qa_score is not None:
+    #             qa_content_type = None
+    #             # QA 답변의 content_id에 해당하는 content_type을 contents_df에서 찾습니다.
+    #             # 참고: content_id가 여러 type에 존재할 가능성은 낮지만, 정확성을 위해 필터링합니다.
+    #             content_match = pbr_app_state.contents_df[pbr_app_state.contents_df['content_id'] == qa_content_id]
+                
+    #             if not content_match.empty:
+    #                 # 일반적으로 하나의 content_id는 하나의 type을 가질 것입니다.
+    #                 # 만약 여러 타입이 있다면, 첫 번째 타입을 사용하거나 명확한 로직이 필요합니다.
+    #                 qa_content_type = content_match['type'].iloc[0]
+    #             else:
+    #                 logger.warning(f"QA 답변 콘텐츠 ID {qa_content_id}에 대한 content_type을 찾을 수 없습니다. QA 점수를 반영하지 않습니다.")
+    #                 continue # content_type을 찾지 못했으므로 다음 QA 답변으로 넘어감
+                
+    #             if qa_content_type: # content_type을 성공적으로 찾았다면
+    #                 # 튜플 키를 사용하여 unified_feedback에 점수를 추가합니다.
+    #                 key = (qa_content_id, qa_content_type)
+    #                 unified_feedback[key] += qa_score * QA_WEIGHT
+                
     logger.info(f"사용자 {user_id}의 통합 피드백 생성 완료. {len(unified_feedback)}개의 콘텐츠에 대한 피드백.")
     return unified_feedback
+
 
 def _get_persona_genre_mapping(db: Session) -> Dict[int, List[str]]:
     """
@@ -453,7 +526,7 @@ def _get_persona_genre_mapping(db: Session) -> Dict[int, List[str]]:
 
 def calculate_persona_scores_from_feedback(
     user_id: int,
-    unified_feedback: Dict[int, float]
+    unified_feedback: Dict[Tuple[int, str], float]
 ) -> Dict[str, float]:
     """
     사용자의 통합 피드백을 기반으로 각 페르소나에 대한 점수를 계산합니다.
@@ -496,11 +569,20 @@ def calculate_persona_scores_from_feedback(
                     (pbr_app_state.contents_df['type'] == content_type)
                 ]
                 
-                if not content_row.empty and len(content_row['genres'].iloc[0]) > 0:
-                    genres_str = content_row['genres'].iloc[0]
-                    # genres_str은 이미 리스트이므로 바로 사용
-                    genres_list = [g.strip() for g in genres_str if isinstance(g, str) and g.strip()]
-                    user_positive_genres.update(genres_list)
+                if not content_row.empty: # content_row가 비어있지 않은 경우에만 접근
+                    genres_data = content_row['genres'].iloc[0]
+                    
+                    # FIX: 장르 문자열을 '|' 기준으로 분리하고 공백 제거
+                    if isinstance(genres_data, str):
+                        genres_list = [g.strip() for g in genres_data.split('|') if g.strip()] # <-- FIX
+                    elif isinstance(genres_data, list): # 이미 리스트인 경우를 위한 방어 코드 (data_loader에 따라 다름)
+                        genres_list = [g.strip() for g in genres_data if isinstance(g, str) and g.strip()]
+                    else:
+                        genres_list = []
+                        logger.warning(f"콘텐츠 {content_id}의 장르 데이터 형식이 예상과 다릅니다: {type(genres_data)}. 스킵합니다.")
+
+                    if genres_list: # 장르 리스트가 비어있지 않은 경우에만 처리
+                        user_positive_genres.update(genres_list)
 
                     # 콘텐츠 피드백 기반 페르소나 점수 추가 (기존 로직 유지)
                     for genre_name in genres_list:
@@ -589,7 +671,7 @@ def calculate_persona_scores_from_feedback(
 
 def get_hybrid_persona(
     user_id: int,
-    unified_feedback: pd.DataFrame,
+    unified_feedback: Dict[Tuple[int, str], float],
     db: Session
 ) -> Tuple[Optional[int], Optional[int], Optional[str], Optional[str], Dict[str, float]]:
     """
@@ -816,6 +898,27 @@ def _get_popular_contents_for_persona(persona_id: int, num_recommendations: int)
         )   
     ]
 
+    # 1. 페르소나의 'excluded_genres' 가져오기 (이 데이터가 persona_details_map에 미리 로드되어 있어야 합니다.)
+    persona_excluded_genre_names: List[str] = []
+    persona_detail = pbr_app_state.persona_details_map.get(persona_id)
+    if persona_detail and 'excluded_genres' in persona_detail:
+        persona_excluded_genre_names = persona_detail['excluded_genres']
+        logger.debug(f"페르소나 ID {persona_id}의 제외 장르: {persona_excluded_genre_names}")
+
+    # 2. 제외 장르 필터링
+    if persona_excluded_genre_names and not matched_contents.empty:
+        initial_matched_count = matched_contents.shape[0]
+        
+        # 콘텐츠의 장르가 제외 장르 중 하나라도 포함하는 경우 필터링
+        filtered_contents_without_excluded = matched_contents[
+            ~matched_contents['genres'].apply(
+                lambda content_genres: bool(set(content_genres if content_genres is not None else []).intersection(persona_excluded_genre_names))
+            )
+        ]
+        matched_contents = filtered_contents_without_excluded
+        if initial_matched_count != matched_contents.shape[0]:
+            logger.info(f"페르소나 ID {persona_id}: 제외 장르 필터링 후 {initial_matched_count}개에서 {matched_contents.shape[0]}개로 줄어들었습니다.")
+
     if matched_contents.empty:
         logger.info(f"페르소나 ID {persona_id}의 장르와 매칭되는 콘텐츠가 없습니다. 전체 인기 콘텐츠로 폴백합니다.")
         return _get_general_popular_recommendations(user_id=None, num_recommendations=num_recommendations)
@@ -895,8 +998,17 @@ def update_and_get_recommendations(
         main_persona_id, num_recommendations=RECOMMENDATION_COUNT
     )
 
+    seen_content_keys = set()
+    unique_recommendations: List[RecommendedContent] = []
+
+    for rec in recommendations_for_persona:
+        content_key = (rec.contentId, rec.type)
+        if content_key not in seen_content_keys:
+            seen_content_keys.add(content_key)
+            unique_recommendations.append(rec)
+
     # 캐시된 contentId 목록을 RecommendedContent 객체로 변환하여 반환
-    return recommendations_for_persona[:num_recommendations]
+    return unique_recommendations[:num_recommendations]
 
 def get_persona_based_popular_fallback_recommendations(
     user_id: int,
@@ -1067,16 +1179,91 @@ def recommend_contents_cf(
 
     # 3. 예상 점수가 높은 순으로 정렬하여 추천 콘텐츠 목록 생성
     recommended_content_ids = sorted(final_predicted_ratings.items(), key=lambda item: item[1], reverse=True)
-
+    
     recommendations: List[RecommendedContent] = []
+    seen_content_ids = set() # ✨ 이 라인을 추가하세요: 중복 체크를 위한 set
+
     for content_id, predicted_rating in recommended_content_ids:
-        # _create_recommended_content 함수를 사용하여 RecommendedContent 객체 생성
-        content_info = _create_recommended_content(content_id, predicted_rating=predicted_rating)
-        # 이미 이 함수 내에서 유형 필터링이 되었으므로 다시 필터링할 필요 없음.
-        if content_info.contentId is not None: # 유효한 contentId가 있는지 확인
-            recommendations.append(content_info)
-        if len(recommendations) >= num_recommendations:
+        # ✨ 여기에 중복 체크 로직을 추가합니다.
+        if content_id not in seen_content_ids:
+            # _create_recommended_content 함수를 사용하여 RecommendedContent 객체 생성
+            content_info = _create_recommended_content(content_id, predicted_rating=predicted_rating)
+            # 이미 이 함수 내에서 유형 필터링이 되었으므로 다시 필터링할 필요 없음.
+            if content_info.contentId is not None: # 유효한 contentId가 있는지 확인
+                recommendations.append(content_info) # ✨ 이 부분을 .append(content_info)로 완성하세요
+                seen_content_ids.add(content_id) # ✨ 이 라인을 추가하세요: 추가된 contentId 기록
+        # 필요한 경우, RECOMMENDATION_COUNT에 도달하면 루프 종료
+        if len(recommendations) >= RECOMMENDATION_COUNT: # config.py에서 정의된 RECOMMENDATION_COUNT 사용
             break
 
     logger.info(f"사용자 {user_id}에게 {len(recommendations)}개의 협업 필터링 추천 생성 완료.")
     return recommendations
+
+def calculate_and_store_user_personas(
+    db: Session,
+    user_id: int, # 단일 사용자 ID를 받도록 변경
+    calculated_persona_scores: Dict[str, float] # 계산된 페르소나 점수 딕셔너리를 받도록 변경
+):
+    """
+    주어진 사용자 ID에 대해 계산된 페르소나 점수를 DB 및 전역 상태를 업데이트합니다.
+    """
+    if pbr_app_state.contents_df is None or pbr_app_state.reactions_df is None:
+        logger.error("데이터 로드되지 않음. 페르소나 계산 불가.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="추천 시스템 데이터가 로드되지 않았습니다.")
+
+    logger.info(f"사용자 [{user_id}]의 페르소나 점수 DB 및 상태 저장 시작.")
+
+    persona_name_to_id_map = pbr_app_state.persona_name_to_id_map
+    if persona_name_to_id_map is None or not persona_name_to_id_map:
+        logger.error("페르소나 이름-ID 매핑이 초기화되지 않았습니다. 페르소나 점수 저장 불가.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="페르소나 매핑 데이터가 없습니다.")
+
+    new_user_persona_rows = []
+    for persona_name, score in calculated_persona_scores.items():
+        persona_id = persona_name_to_id_map.get(persona_name)
+        if persona_id is not None:
+            new_user_persona_rows.append({
+                'user_id': user_id,
+                'persona_id': persona_id,
+                'score': score,
+                'created_at': datetime.now(), # pd.Timestamp.now() 대신 datetime.now() 사용
+                'updated_at': datetime.now()
+            })
+    
+    if not new_user_persona_rows:
+        logger.warning(f"사용자 {user_id}에 대해 저장할 페르소나 점수가 없습니다.")
+        return
+
+    new_persona_scores_df = pd.DataFrame(new_user_persona_rows)
+
+    # pbr_app_state.all_user_personas_df 업데이트
+    if pbr_app_state.all_user_personas_df is not None and not pbr_app_state.all_user_personas_df.empty:
+        # 기존 사용자 페르소나 제거 (업데이트를 위해)
+        pbr_app_state.all_user_personas_df = pbr_app_state.all_user_personas_df[
+            pbr_app_state.all_user_personas_df['user_id'] != user_id
+        ]
+        pbr_app_state.all_user_personas_df = pd.concat([pbr_app_state.all_user_personas_df, new_persona_scores_df], ignore_index=True)
+    else:
+        pbr_app_state.all_user_personas_df = new_persona_scores_df
+
+    # DB에 저장 (upsert 로직)
+    for _, row in new_persona_scores_df.iterrows():
+        user_persona = db.query(UserPersona).filter_by(
+            user_id=int(row['user_id']),
+            persona_id=int(row['persona_id'])
+        ).first()
+
+        if user_persona:
+            user_persona.score = float(row['score'])
+            user_persona.updated_at = func.now()
+        else:
+            user_persona = UserPersona(
+                user_id=int(row['user_id']),
+                persona_id=int(row['persona_id']),
+                score=float(row['score']),
+                created_at=func.now(),
+                updated_at=func.now()
+            )
+            db.add(user_persona)
+    db.commit()
+    logger.info(f"DB/State: 사용자 [{user_id}]의 페르소나 점수 {len(new_persona_scores_df)}개 저장/업데이트 완료.")
