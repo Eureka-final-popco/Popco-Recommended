@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
+from fastapi import Path
 from datetime import datetime
 
 # DB 모델 임포트
@@ -21,7 +22,8 @@ from .config import (
 from persona_based_recommender.persona_generator import (
     calculate_user_content_matrix_sparse, 
     calculate_user_similarity,
-    calculate_and_store_user_personas      
+    calculate_and_store_user_personas   ,
+    update_user_persona_scores   
 )
 from .schemas import InitialFeedbackRequest, FeedbackRequest, RecommendationResponse, RecommendedContent, PersonaCountsResponse
 
@@ -32,14 +34,13 @@ logger = logging.getLogger(__name__)
 persona_recommender_router = APIRouter(prefix="/recommends/personas")
 
 
-@persona_recommender_router.post("/onboard", response_model=RecommendationResponse, status_code=status.HTTP_200_OK)
+@persona_recommender_router.post("/onboard", response_model=RecommendationResponse, status_code=status.HTTP_200_OK, summary="새로운 사용자 페르소나 부여")
 async def onboard_user(
     request: InitialFeedbackRequest,
     db: Session = Depends(get_db)
 ):
     """
     신규 사용자 온보딩: 초기 피드백(선호 콘텐츠 좋아요)과 QA 답변을 기반으로 페르소나를 결정하고 추천을 제공합니다.
-    QA 답변은 DB에 저장되지 않고, 페르소나 계산에만 사용됩니다.
     """
     user_id = request.user_id
     logger.info(f"사용자 {user_id} 온보딩 시작.")
@@ -52,9 +53,9 @@ async def onboard_user(
         try:
             new_user = User(
                 user_id=user_id,
-                email=f"user_{user_id}@example.com", # 임시 이메일
-                name=f"User {user_id}",               # 임시 이름
-                password="hashed_password",          # 실제 환경에서는 해싱된 비밀번호 사용
+                email=f"user_{user_id}@example.com", 
+                name=f"User {user_id}",              
+                password="hashed_password",        
                 is_active=True
             )
             db.add(new_user)
@@ -215,7 +216,7 @@ async def onboard_user(
     )
 
 
-@persona_recommender_router.post("/feedback", response_model=RecommendationResponse, status_code=status.HTTP_200_OK)
+@persona_recommender_router.post("/feedback", response_model=RecommendationResponse, status_code=status.HTTP_200_OK, summary="기존 사용자 좋아요, 싫어요, 별점 평가 & 페르소나 점수 업데이트")
 async def submit_feedback(
     request: FeedbackRequest,
     db: Session = Depends(get_db)
@@ -226,7 +227,7 @@ async def submit_feedback(
     user_id = request.user_id
     content_id = request.content_id
     content_type = request.content_type
-    reaction_type_str = request.reaction_type # 문자열로 받은 reaction_type
+    reaction_type_str = request.reaction_type 
     score = request.score
 
     logger.info(f"사용자 {user_id}의 피드백 접수: 콘텐츠 {content_id}, 타입 {content_type}, 반응 {reaction_type_str}, 점수 {score}")
@@ -245,7 +246,7 @@ async def submit_feedback(
     try:
         # 1. 사용자 피드백을 DB에 저장하고 pbr_app_state 갱신 (반응 또는 평점)
         if reaction_type_str in ['좋아요', '싫어요']:
-            db_reaction_enum = None # <-- ReactionType enum 멤버를 저장할 변수
+            db_reaction_enum = None
             if reaction_type_str == '좋아요':
                 db_reaction_enum = ReactionType.LIKE
             elif reaction_type_str == '싫어요':
@@ -287,7 +288,7 @@ async def submit_feedback(
                     'created_at': pd.Timestamp.now(), 'updated_at': pd.Timestamp.now()
                 }])
             logger.info(f"DB/State: 사용자 {user_id}의 콘텐츠 반응({reaction_type_str}) 저장/업데이트 준비 완료.")
-
+            db.flush()
 
         elif reaction_type_str == '평점':
             if score is None:
@@ -335,12 +336,11 @@ async def submit_feedback(
                     'created_at': pd.Timestamp.now(), 'updated_at': pd.Timestamp.now()
                 }])
             logger.info(f"DB/State: 사용자 {user_id}의 평점({score}) 저장/업데이트 준비 완료.")
+            db.flush()
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="유효하지 않은 reaction_type입니다. '좋아요', '싫어요', '평점' 중 하나여야 합니다.")
 
-        # 모든 DB 변경사항을 한 번에 커밋 (이것이 유일한 commit이어야 합니다!)
-        db.commit()
-        logger.info(f"DB: 사용자 {user_id} 피드백 및 페르소나 업데이트 관련 모든 변경사항 커밋 완료.")
+        # logger.info(f"DB: 사용자 {user_id} 피드백 및 페르소나 업데이트 관련 모든 변경사항 커밋 완료.")
 
         # 2. 페르소나 재계산 및 DB/pbr_app_state 업데이트
         # 이제 update_user_persona_scores는 방금 커밋된 최신 피드백을 DB에서 조회할 수 있습니다.
@@ -395,6 +395,10 @@ async def submit_feedback(
         )
 
     logger.info(f"사용자 {user_id} 피드백 처리 완료. {len(recommendations)}개 추천.")
+
+    db.commit()
+    logger.info(f"DB: 사용자 {user_id} 피드백 및 페르소나 업데이트 관련 모든 변경사항 최종 커밋 완료.")
+
     return RecommendationResponse(
         message="피드백이 성공적으로 처리되었고 새로운 추천이 제공되었습니다.",
         recommendations=recommendations,
@@ -403,12 +407,71 @@ async def submit_feedback(
         all_personas_scores=all_personas_scores
     )
 
+@persona_recommender_router.delete("/users/{user_id}/contents/{content_id}/reaction/{content_type}", status_code=status.HTTP_204_NO_CONTENT, summary="좋아요, 싫어요 취소")
+async def delete_content_reaction(
+    user_id: int = Path(..., description="사용자 ID"), 
+    content_id: int = Path(..., description="콘텐츠 ID"),
+    content_type: str = Path(..., description="콘텐츠 타입 (예: movie, tv)"), 
+    db: Session = Depends(get_db)
+):
+    """
+    사용자의 특정 콘텐츠 반응(좋아요/싫어요)을 삭제합니다. 사용자 페르소나 점수도 업데이트됩니다.
+    """
+    existing_reaction = db.query(ContentReaction).filter(
+        ContentReaction.user_id == user_id,
+        ContentReaction.content_id == content_id,
+        ContentReaction.type == content_type 
+    ).first()
 
-@persona_recommender_router.get("/users/{user_id}/recommendations", response_model=RecommendationResponse)
+    if not existing_reaction:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="해당 반응을 찾을 수 없습니다.")
+
+    try:
+        db.delete(existing_reaction)
+        db.commit()
+        logger.info(f"사용자 {user_id}의 콘텐츠 {content_id} ({content_type}) 반응 삭제 완료.")
+        
+        # 페르소나 점수 재계산 및 업데이트 트리거
+        update_user_persona_scores(user_id, db)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"반응 삭제 중 오류 발생: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="반응 삭제 중 오류가 발생했습니다.")
+
+
+@persona_recommender_router.delete("/users/{user_id}/reviews/{review_id}", status_code=status.HTTP_204_NO_CONTENT, summary="리뷰 삭제")
+async def delete_review(user_id: int, review_id: int, db: Session = Depends(get_db)):
+    """
+    사용자의 특정 리뷰를 삭제합니다. 사용자 페르소나 점수도 업데이트됩니다.
+    """
+    existing_review = db.query(Review).filter(
+        Review.review_id == review_id,
+        Review.user_id == user_id 
+    ).first()
+
+    if not existing_review:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="리뷰를 찾을 수 없습니다.")
+
+    try:
+        db.delete(existing_review)
+        db.commit()
+        logger.info(f"사용자 {user_id}의 리뷰 {review_id} 삭제 완료.")
+
+        # 페르소나 점수 재계산 및 업데이트 트리거
+        update_user_persona_scores(user_id, db)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"리뷰 삭제 중 오류 발생: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="리뷰 삭제 중 오류가 발생했습니다.")
+
+
+@persona_recommender_router.get("/users/{user_id}/recommendations", response_model=RecommendationResponse, summary="사용자 최신 추천 리스트 및 페르소나 점수 확인")
 async def get_user_recommendations(
     user_id: int,
     content_type: Optional[str] = None,
-    db: Session = Depends(get_db) # DB 세션을 의존성 주입으로 받습니다.
+    db: Session = Depends(get_db)
 ):
     """
     특정 사용자에게 추천 콘텐츠 목록을 제공합니다.
@@ -511,7 +574,7 @@ async def get_user_recommendations(
         logger.error(f"추천 생성 중 오류 발생: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"추천 생성 중 오류 발생: {e}")
 
-@persona_recommender_router.get("/persona-counts", response_model=PersonaCountsResponse)
+@persona_recommender_router.get("/persona-counts", response_model=PersonaCountsResponse, summary="각 페르소나에 속하는 사용자 수 반환")
 async def get_persona_counts(
     db: Session = Depends(get_db)
 ):

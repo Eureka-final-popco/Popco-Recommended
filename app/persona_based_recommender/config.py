@@ -41,7 +41,7 @@ QA_INITIAL_RECOMMENDATION_THRESHOLD = 0.5       # QA 답변 기반 초기 추천
 
 # 페르소나 점수 관련
 MAX_EXPECTED_PERSONA_SCORE = 100.0              # 임의의 최대 예상 점수 (사용자 제공)
-MIN_PERSONA_SCORE = 0.0                         # 점수가 음수가 될 가능성이 없다면 0으로 설정 (사용자 제공)
+MIN_PERSONA_SCORE = 0.1                         
 BABY_PERSONA_THRESHOLD = 10.0                   # 메인 페르소나와 서브 페르소나 점수 차이 임계값 (사용자 제공)
 
 # 캐시 설정 (초 단위)

@@ -20,7 +20,7 @@ import traceback
 from contextlib import asynccontextmanager
 import pandas as pd
 import logging
-import gc  # 가비지 컬렉션을 위해 추가
+import gc 
 
 from config import settings
 from database import check_db_connection, get_db
