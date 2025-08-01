@@ -32,77 +32,40 @@ from models import UserPersona, ContentReaction, Review, Persona, ReactionType #
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
-def _get_contents_info(content_ids: List[int]) -> List[Dict]:
-    """
-    주어진 content_ids에 해당하는 콘텐츠 정보를 pbr_app_state.contents_df에서 조회합니다.
-    pbr_app_state.contents_df에는 'id', 'title', 'genres', 'type', 'poster_path' 컬럼이 있다고 가정합니다.
-    """
-    if pbr_app_state.contents_df is None or pbr_app_state.contents_df.empty:
-        logger.warning("contents_df가 로드되지 않았거나 비어 있습니다. 콘텐츠 정보를 가져올 수 없습니다.")
-        return []
-
-    contents_info_df = pbr_app_state.contents_df[pbr_app_state.contents_df['content_id'].isin(content_ids)]
-
-    results = []
-    for _, row in contents_info_df.iterrows():
-        genres_data = row.get('genres') # 'genres' 컬럼의 원본 값을 가져옵니다.
-        genres_list = []
-
-        # genres_data가 이미 리스트인 경우 바로 사용
-        if isinstance(genres_data, list):
-            genres_list = [g.strip() for g in genres_data if isinstance(g, str) and g.strip()]
-        # genres_data가 문자열인 경우 파싱 (이 경우는 data_loader에서 이미 처리되었으므로 거의 발생하지 않을 것임)
-        elif isinstance(genres_data, str) and genres_data.strip():
-            if ',' in genres_data:
-                genres_list = [genre.strip() for genre in genres_data.split(',') if genre.strip()]
-            elif '|' in genres_data:
-                genres_list = [g.strip() for g in genres_data.split('|') if g.strip()]
-            else:
-                genres_list = [genres_data.strip()] # 단일 장르
-        
-        results.append({
-            "contentId": int(row['content_id']), # Pydantic 모델에 맞게 int로 변환
-            "title": row.get('title', ''), # get()으로 기본값 지정, None 방지
-            "genres": genres_list,
-            "type": row.get('type', ''),
-            "poster_path": row.get('poster_path', ''),
-            # 필요하다면 다른 필드도 여기에 추가할 수 있습니다.
-            # 예: "rating_average": row.get('rating_average'),
-            #     "rating_count": row.get('rating_count')
-        })
-    return results
-
 def _create_recommended_content(
-    content_id: int,
+    content_data: Dict, # content_id 대신 필터링된 콘텐츠 데이터를 받습니다.
     predicted_rating: Optional[float] = None,
-    persona_genre_match: Optional[float] = None) -> RecommendedContent:
+    persona_genre_match: Optional[float] = None
+) -> RecommendedContent:
     """
-    contentId를 기반으로 RecommendedContent 객체를 생성하고, pbr_app_state.contents_df에서 추가 정보를 채웁니다.
+    주어진 콘텐츠 데이터 딕셔너리를 기반으로 RecommendedContent 객체를 생성합니다.
+    (이미 필터링된 DataFrame의 row에서 온 데이터를 사용합니다.)
     """
-    content_info = _get_contents_info([content_id])
-    if content_info:
-        info = content_info[0]
-        return RecommendedContent(
-            contentId=content_id,
-            title=info.get('title'),
-            genres=info.get('genres', []),
-            type=info.get('type'),
-            poster_path=info.get('poster_path'),
-            predicted_rating=predicted_rating,
-            persona_genre_match=persona_genre_match
-        )
-    else:
-        # 정보가 없는 경우 기본값으로 채운 RecommendedContent 반환 (Null 값 방지)
-        return RecommendedContent(
-            contentId=content_id,
-            title=str(content_id), # contentId로 대체
-            genres=[],
-            type=None,
-            poster_path=None,
-            predicted_rating=predicted_rating,
-            persona_genre_match=persona_genre_match
-        )
+    # content_data는 이미 필터링된 DataFrame의 row에서 온 것이므로, 추가 조회나 None 체크 불필요
+    
+    genres_data = content_data.get('genres')
+    genres_list = []
+    if isinstance(genres_data, list):
+        genres_list = [g.strip() for g in genres_data if isinstance(g, str) and g.strip()]
+    elif isinstance(genres_data, str) and genres_data.strip():
+        if ',' in genres_data:
+            genres_list = [genre.strip() for genre in genres_data.split(',') if genre.strip()]
+        elif '|' in genres_data:
+            genres_list = [g.strip() for g in genres_data.split('|') if g.strip()]
+        else:
+            genres_list = [genres_data.strip()] # 단일 장르
+
+
+    return RecommendedContent(
+        contentId=int(content_data.get('content_id')), # content_id가 int인지 확인
+        title=content_data.get('title', ''),
+        genres=genres_list, # 파싱된 장르 리스트 사용
+        type=content_data.get('type', ''), # 이미 필터링된 정확한 type 정보 사용
+        poster_path=content_data.get('poster_path', ''),
+        predicted_rating=predicted_rating,
+        persona_genre_match=persona_genre_match
+    )
+
 
 def calculate_user_content_matrix_sparse(
     reactions_df: pd.DataFrame,
@@ -202,10 +165,8 @@ def calculate_and_store_user_personas(
             else:
                 logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 점수 변화 없음 ({new_score}).")
 
-            # --- 이 부분이 중요합니다! score_changed 조건문 밖으로 이동 ---
             user_persona.updated_at = current_utc_time # 점수 변화와 상관없이 updated_at 갱신
-            personas_to_add_or_update.append(user_persona) # 변경사항을 세션에 추가
-            # --- 변경 끝 ---
+            # personas_to_add_or_update.append(user_persona) # 변경사항을 세션에 추가
 
         else:
             # 새로운 페르소나라면 삽입
@@ -216,7 +177,8 @@ def calculate_and_store_user_personas(
                 created_at=current_utc_time,
                 updated_at=current_utc_time
             )
-            personas_to_add_or_update.append(new_user_persona)
+            # personas_to_add_or_update.append(new_user_persona)
+            db.add(new_user_persona)
             logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 새로운 페르소나 점수 삽입됨 ({new_score}).")
 
     personas_to_delete = [
@@ -229,11 +191,12 @@ def calculate_and_store_user_personas(
             db.delete(ptd)
         logger.info(f"사용자 {user_id}의 더 이상 유효하지 않은 페르소나 점수 {len(personas_to_delete)}개 삭제됨.")
 
-    if personas_to_add_or_update:
-        db.add_all(personas_to_add_or_update)
-        logger.info(f"사용자 {user_id}의 페르소나 점수 {len(personas_to_add_or_update)}개 업데이트/추가됨.")
-    else:
-        logger.info(f"사용자 {user_id}의 페르소나 점수에 변경사항이 없거나 유효한 점수가 없어 업데이트/추가되지 않았습니다.")
+    try:
+        db.flush()
+        logger.info(f"DB: 사용자 [{user_id}]의 페르소나 점수 변경사항 플러시 완료.")
+    except Exception as e:
+        logger.error(f"DB 변경사항 플러시 중 오류 발생: {e}", exc_info=True)
+        raise
 
     logger.info(f"사용자 {user_id}의 페르소나 점수 DB 저장 완료 (Upsert 방식).")
 
@@ -738,41 +701,6 @@ def get_hybrid_persona(
     return main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores
 
 
-# def update_persona_recommendations_cache_by_persona_id(persona_id: int, num_recommendations: int):
-#     logger.info(f"페르소나 ID {persona_id}에 대한 추천 캐시 업데이트 중...")
-#     try:
-#         recommendations = _get_popular_contents_for_persona(persona_id, num_recommendations=num_recommendations)
-#         if recommendations:
-#             if pbr_app_state.recommendation_cache is None:
-#                 pbr_app_state.recommendation_cache = {}
-
-#             pbr_app_state.recommendation_cache[persona_id] = {
-#                 "recommendations": recommendations,
-#                 "timestamp": datetime.now()
-#             }
-#             logger.info(f"페르소나 ID {persona_id}에 대한 추천 캐시 업데이트 완료.")
-#         else:
-#             logger.warning(f"페르소나 ID {persona_id}에 대한 인기 기반 추천을 생성할 수 없어 캐시를 업데이트하지 못했습니다.")
-#     except Exception as e:
-#         logger.error(f"페르소나 ID {persona_id}에 대한 추천 캐시 업데이트 중 오류 발생: '{e}'", exc_info=True)
-
-# def get_recommendations_from_cache_by_persona_id(persona_id: int) -> Optional[List[RecommendedContent]]:
-#     """
-#     캐시에서 특정 페르소나 ID에 대한 추천을 가져옵니다.
-#     만료 시간을 확인하여 유효한 경우에만 반환합니다.
-#     """
-#     if pbr_app_state.recommendation_cache is None:
-#         return None
-#     cached_data = pbr_app_state.recommendation_cache.get(persona_id)
-#     if cached_data:
-#         timestamp = cached_data.get("timestamp")
-#         if (datetime.now() - timestamp).total_seconds() < RECOMMENDATION_CACHE_EXPIRATION_SECONDS:
-#             return cached_data.get("recommendations")
-#         else:
-#             logger.info(f"페르소나 ID {persona_id}의 추천 캐시가 만료되었습니다.")
-#             del pbr_app_state.recommendation_cache[persona_id] # 만료된 캐시 제거
-#     return None
-
 def _get_general_popular_recommendations(user_id: int, num_recommendations: int, content_type_filter: Optional[str] = None, db: Session = None) -> List[RecommendedContent]:
     """
     모든 콘텐츠 중에서 가장 인기 있는 콘텐츠를 반환합니다.
@@ -830,10 +758,11 @@ def _get_general_popular_recommendations(user_id: int, num_recommendations: int,
     current_count = 0
     for _, row in sorted_popular_contents.iterrows():
         if current_count >= num_recommendations:
-            break # 원하는 개수만큼 채워지면 중단
+            break
 
+        # _create_recommended_content 함수 호출 변경: 딕셔너리 데이터 전달
         recommended_list.append(_create_recommended_content(
-            content_id=row['content_id'],
+            content_data=row.to_dict(), # DataFrame row를 딕셔너리로 변환하여 전달
             predicted_rating=row['popularity_score'],
             persona_genre_match=None
         ))
@@ -944,24 +873,20 @@ def _get_popular_contents_for_persona(persona_id: int, num_recommendations: int)
     recommended_list = []
     current_count = 0 # 현재 추가된 추천 개수를 세는 변수
     for _, row in top_popular_contents.iterrows():
-        # 여기에 user_id를 받아온다면, 이미 본 콘텐츠를 제외하는 로직을 추가할 수 있습니다.
-        # (현재 이 함수는 user_id를 받지 않으므로, 이 부분은 _get_persona_based_popular_fallback_recommendations에서 처리됨)
-
         if current_count >= num_recommendations:
-            break # 원하는 개수만큼 채워졌으면 루프 종료
+            break
 
-        content_id = int(row['content_id'])
-        content_type = row['type'] # content_type 추가
+        # content_id = int(row['content_id']) # 이 줄은 이제 필요 없습니다.
+        # content_type = row['type'] # 이 줄도 이제 필요 없습니다.
         
-        # _create_recommended_content 함수에 content_type도 전달 (필요하다면)
+        # _create_recommended_content 함수 호출 변경: 딕셔너리 데이터 전달
         content_info = _create_recommended_content(
-            content_id=content_id,
+            content_data=row.to_dict(), # DataFrame row를 딕셔너리로 변환하여 전달
             predicted_rating=row['popularity_score'],
-            persona_genre_match=True # 1.0 대신 True로 변경
+            persona_genre_match=True
         )
         
         if content_info.contentId is not None:
-            # 여기서 content_type_filter가 적용되지 않으므로, _get_persona_based_popular_fallback_recommendations에서 필터링해야 합니다.
             recommended_list.append(content_info)
             current_count += 1
 
@@ -1143,127 +1068,81 @@ def recommend_contents_cf(
     similar_users_info.sort(key=lambda x: x[1], reverse=True)
 
     # 2. 대상 사용자가 아직 평가하지 않은 콘텐츠에 대한 예상 점수 계산
-    predicted_ratings: Dict[int, float] = defaultdict(float)
-    similarity_sums: Dict[int, float] = defaultdict(float)
+    # 예측 점수를 저장할 딕셔너리의 키를 (content_id, type) 튜플로 변경
+    predicted_ratings: Dict[Tuple[int, str], float] = defaultdict(float) # <-- 변경
+    similarity_sums: Dict[Tuple[int, str], float] = defaultdict(float)   # <-- 변경
 
     # 사용자가 이미 평가한 콘텐츠 목록
-    user_rated_contents = pbr_app_state.user_item_matrix[user_idx].nonzero()[1]
-    user_rated_content_ids = {pbr_app_state.idx_to_content_id_map[c_idx][0] for c_idx in user_rated_contents}
+    # user_rated_content_ids는 이제 (content_id, type) 튜플의 집합으로 변경됩니다.
+    user_rated_content_ids: Set[Tuple[int, str]] = set() # <-- 변경
+    for c_idx in pbr_app_state.user_item_matrix[user_idx].nonzero()[1]:
+        original_content_id, content_type_from_matrix = pbr_app_state.idx_to_content_id_map[c_idx]
+        user_rated_content_ids.add((original_content_id, content_type_from_matrix)) # <-- 변경
+
 
     for other_user_idx, similarity in similar_users_info:
         # 유사한 사용자의 평가 기록 가져오기
         other_user_ratings_indices = pbr_app_state.user_item_matrix[other_user_idx].nonzero()[1]
         for content_matrix_idx in other_user_ratings_indices:
-            original_content_id, content_type = pbr_app_state.idx_to_content_id_map[content_matrix_idx]
+            original_content_id, content_type_from_matrix = pbr_app_state.idx_to_content_id_map[content_matrix_idx]
 
-            # 사용자가 이미 평가한 콘텐츠는 제외
-            if original_content_id in user_rated_content_ids:
+            # 사용자가 이미 평가한 콘텐츠는 제외 (이제 (content_id, type) 튜플로 비교)
+            if (original_content_id, content_type_from_matrix) in user_rated_content_ids: # <-- 변경
                 continue
 
             # 유형 필터 적용
-            if content_type_filter and content_type_filter != content_type:
+            if content_type_filter and content_type_filter != content_type_from_matrix:
                 continue
 
             rating = pbr_app_state.user_item_matrix[other_user_idx, content_matrix_idx]
 
-            predicted_ratings[original_content_id] += rating * similarity
-            similarity_sums[original_content_id] += abs(similarity) # 음수 유사도도 고려하여 절댓값 사용
+            # predicted_ratings와 similarity_sums의 키를 (content_id, type) 튜플로 사용
+            predicted_ratings[(original_content_id, content_type_from_matrix)] += rating * similarity # <-- 변경
+            similarity_sums[(original_content_id, content_type_from_matrix)] += abs(similarity) # <-- 변경 (음수 유사도도 고려하여 절댓값 사용)
 
     # 예상 점수 정규화
-    final_predicted_ratings = {}
-    for content_id, total_score in predicted_ratings.items():
-        if similarity_sums[content_id] > 0:
-            final_predicted_ratings[content_id] = total_score / similarity_sums[content_id]
+    final_predicted_ratings: Dict[Tuple[int, str], float] = {} # <-- 변경
+    for (content_id, content_type), total_score in predicted_ratings.items(): # <-- 변경
+        if similarity_sums[(content_id, content_type)] > 0: # <-- 변경
+            final_predicted_ratings[(content_id, content_type)] = total_score / similarity_sums[(content_id, content_type)] # <-- 변경
         else:
-            final_predicted_ratings[content_id] = 0 # 유사 사용자가 없거나 유사도 합이 0인 경우
+            final_predicted_ratings[(content_id, content_type)] = 0 # <-- 변경 (유사 사용자가 없거나 유사도 합이 0인 경우)
 
     # 3. 예상 점수가 높은 순으로 정렬하여 추천 콘텐츠 목록 생성
-    recommended_content_ids = sorted(final_predicted_ratings.items(), key=lambda item: item[1], reverse=True)
-    
-    recommendations: List[RecommendedContent] = []
-    seen_content_ids = set() # ✨ 이 라인을 추가하세요: 중복 체크를 위한 set
+    # 정렬 키도 이제 (content_id, type) 튜플을 반환하도록 합니다.
+    recommended_content_items = sorted(final_predicted_ratings.items(), key=lambda item: item[1], reverse=True) # <-- 변경된 변수명
 
-    for content_id, predicted_rating in recommended_content_ids:
-        # ✨ 여기에 중복 체크 로직을 추가합니다.
-        if content_id not in seen_content_ids:
-            # _create_recommended_content 함수를 사용하여 RecommendedContent 객체 생성
-            content_info = _create_recommended_content(content_id, predicted_rating=predicted_rating)
-            # 이미 이 함수 내에서 유형 필터링이 되었으므로 다시 필터링할 필요 없음.
-            if content_info.contentId is not None: # 유효한 contentId가 있는지 확인
-                recommendations.append(content_info) # ✨ 이 부분을 .append(content_info)로 완성하세요
-                seen_content_ids.add(content_id) # ✨ 이 라인을 추가하세요: 추가된 contentId 기록
-        # 필요한 경우, RECOMMENDATION_COUNT에 도달하면 루프 종료
-        if len(recommendations) >= RECOMMENDATION_COUNT: # config.py에서 정의된 RECOMMENDATION_COUNT 사용
+    recommendations: List[RecommendedContent] = []
+    # seen_content_ids는 이제 (content_id, type) 튜플의 집합으로 변경됩니다.
+    seen_content_items: Set[Tuple[int, str]] = set() # <-- 변경
+
+    # recommended_content_items에서 (content_id, content_type)과 predicted_rating을 함께 추출
+    for (content_id, content_type), predicted_rating in recommended_content_items: # <-- 변경
+        if (content_id, content_type) not in seen_content_items: # <-- 변경
+            # content_id와 content_type에 해당하는 정확한 콘텐츠 정보를 pbr_app_state.contents_df에서 가져옵니다.
+            content_row_df = pbr_app_state.contents_df[
+                (pbr_app_state.contents_df['content_id'] == content_id) &
+                (pbr_app_state.contents_df['type'] == content_type) # <--- type 필터 추가
+            ]
+
+            if content_row_df.empty:
+                logger.warning(f"CF 추천: content_id {content_id}, type {content_type}의 정보를 pbr_app_state.contents_df에서 찾을 수 없습니다. 건너뜜.")
+                continue # 정보가 없는 콘텐츠는 건너뛰기
+
+            content_row = content_row_df.iloc[0].to_dict() # DataFrame row를 딕셔너리로 변환
+
+            # _create_recommended_content 함수 호출 변경: 딕셔너리 데이터 전달
+            content_info = _create_recommended_content(
+                content_data=content_row,
+                predicted_rating=predicted_rating
+            )
+            
+            if content_info.contentId is not None:
+                recommendations.append(content_info)
+                seen_content_items.add((content_id, content_type)) # <-- 변경
+        
+        if len(recommendations) >= num_recommendations: # 'RECOMMENDATION_COUNT' 대신 'num_recommendations' 사용
             break
 
     logger.info(f"사용자 {user_id}에게 {len(recommendations)}개의 협업 필터링 추천 생성 완료.")
     return recommendations
-
-def calculate_and_store_user_personas(
-    db: Session,
-    user_id: int, # 단일 사용자 ID를 받도록 변경
-    calculated_persona_scores: Dict[str, float] # 계산된 페르소나 점수 딕셔너리를 받도록 변경
-):
-    """
-    주어진 사용자 ID에 대해 계산된 페르소나 점수를 DB 및 전역 상태를 업데이트합니다.
-    """
-    if pbr_app_state.contents_df is None or pbr_app_state.reactions_df is None:
-        logger.error("데이터 로드되지 않음. 페르소나 계산 불가.")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="추천 시스템 데이터가 로드되지 않았습니다.")
-
-    logger.info(f"사용자 [{user_id}]의 페르소나 점수 DB 및 상태 저장 시작.")
-
-    persona_name_to_id_map = pbr_app_state.persona_name_to_id_map
-    if persona_name_to_id_map is None or not persona_name_to_id_map:
-        logger.error("페르소나 이름-ID 매핑이 초기화되지 않았습니다. 페르소나 점수 저장 불가.")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="페르소나 매핑 데이터가 없습니다.")
-
-    new_user_persona_rows = []
-    for persona_name, score in calculated_persona_scores.items():
-        persona_id = persona_name_to_id_map.get(persona_name)
-        if persona_id is not None:
-            new_user_persona_rows.append({
-                'user_id': user_id,
-                'persona_id': persona_id,
-                'score': score,
-                'created_at': datetime.now(), # pd.Timestamp.now() 대신 datetime.now() 사용
-                'updated_at': datetime.now()
-            })
-    
-    if not new_user_persona_rows:
-        logger.warning(f"사용자 {user_id}에 대해 저장할 페르소나 점수가 없습니다.")
-        return
-
-    new_persona_scores_df = pd.DataFrame(new_user_persona_rows)
-
-    # pbr_app_state.all_user_personas_df 업데이트
-    if pbr_app_state.all_user_personas_df is not None and not pbr_app_state.all_user_personas_df.empty:
-        # 기존 사용자 페르소나 제거 (업데이트를 위해)
-        pbr_app_state.all_user_personas_df = pbr_app_state.all_user_personas_df[
-            pbr_app_state.all_user_personas_df['user_id'] != user_id
-        ]
-        pbr_app_state.all_user_personas_df = pd.concat([pbr_app_state.all_user_personas_df, new_persona_scores_df], ignore_index=True)
-    else:
-        pbr_app_state.all_user_personas_df = new_persona_scores_df
-
-    # DB에 저장 (upsert 로직)
-    for _, row in new_persona_scores_df.iterrows():
-        user_persona = db.query(UserPersona).filter_by(
-            user_id=int(row['user_id']),
-            persona_id=int(row['persona_id'])
-        ).first()
-
-        if user_persona:
-            user_persona.score = float(row['score'])
-            user_persona.updated_at = func.now()
-        else:
-            user_persona = UserPersona(
-                user_id=int(row['user_id']),
-                persona_id=int(row['persona_id']),
-                score=float(row['score']),
-                created_at=func.now(),
-                updated_at=func.now()
-            )
-            db.add(user_persona)
-    db.commit()
-    logger.info(f"DB/State: 사용자 [{user_id}]의 페르소나 점수 {len(new_persona_scores_df)}개 저장/업데이트 완료.")
