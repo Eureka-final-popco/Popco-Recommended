@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 class FilteringAppState:
     def __init__(self):
         # 데이터프레임
+        self.users_df: Optional[pd.DataFrame] = None
         self.contents_df: Optional[pd.DataFrame] = None
         self.reactions_df: Optional[pd.DataFrame] = None
         self.reviews_df: Optional[pd.DataFrame] = None
