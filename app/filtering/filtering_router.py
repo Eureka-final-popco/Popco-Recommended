@@ -13,7 +13,7 @@ from .config import RECOMMENDATION_COUNT
 
 logger = logging.getLogger(__name__)
 
-filtering_recommender_router = APIRouter(prefix="/recommends/filters")
+filtering_recommender_router = APIRouter()
 
 class PopularContentResponse(BaseModel):
     content_id: int = Field(..., alias="contentId", description="콘텐츠 ID")
