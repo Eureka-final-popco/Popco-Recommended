@@ -46,6 +46,9 @@ from persona_based_recommender.state import pbr_app_state
 from persona_based_recommender.persona_router import persona_recommender_router
 from persona_based_recommender.data_loader import load_all_data
 
+from filtering.filtering_router import filtering_recommender_router
+from filtering.data_loader import load_all_filtering_data
+
 APP_ROOT_DIR = Path(__file__).parent # '/app'
 S3_BUCKET_NAME = settings.MY_AWS_S3_BUCKET_NAME
 s3 = boto3.client(
@@ -253,6 +256,7 @@ async def lifespan(app: FastAPI):
         
         # data_loader의 load_all_data 함수를 직접 호출
         load_all_data()
+        load_all_filtering_data()
         await initialize_local_recommender_system()
 
         logger.info("추천 시스템 데이터 초기화 완료.")
@@ -277,6 +281,7 @@ app.add_middleware(
 )
 
 app.include_router(persona_recommender_router)
+app.include_router(filtering_recommender_router, prefix="/recommends/filters")
 
 @app.get("/", tags=["기본"])
 def root():
