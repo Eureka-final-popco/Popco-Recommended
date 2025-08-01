@@ -230,33 +230,33 @@ async def lifespan(app: FastAPI):
     print("🚀 영화 데이터 캐싱 시작...")
     
     try:
-        # # S3에서 CSV 로드 (청크 크기 조정 가능)
-        # csv_key = 'popcorithm_contents_metadata.csv'
-        # print("📊 CSV 파일 로딩 중...")
-        # cached_movie_df = load_csv_from_s3(S3_BUCKET_NAME, csv_key, chunksize=5000)  # 청크 크기를 5000으로 설정
+        # S3에서 CSV 로드 (청크 크기 조정 가능)
+        csv_key = 'popcorithm_contents_metadata.csv'
+        print("📊 CSV 파일 로딩 중...")
+        cached_movie_df = load_csv_from_s3(S3_BUCKET_NAME, csv_key, chunksize=5000)  # 청크 크기를 5000으로 설정
         
-        # # DataFrame 메모리 최적화
-        # cached_movie_df = optimize_dataframe_memory(cached_movie_df)
-        # print(f"✅ S3 CSV 로드 및 최적화 완료: {len(cached_movie_df)}개 영화")
+        # DataFrame 메모리 최적화
+        cached_movie_df = optimize_dataframe_memory(cached_movie_df)
+        print(f"✅ S3 CSV 로드 및 최적화 완료: {len(cached_movie_df)}개 영화")
         
-        # # S3에서 JSON 로드
-        # json_key = 'popcorithm_with_features.json'
-        # print("📋 JSON 파일 로딩 중...")
-        # cached_features = load_json_from_s3(S3_BUCKET_NAME, json_key, check_size=True)
-        # print(f"✅ S3 JSON 로드 완료: {len(cached_features['actors'])}명 배우")
+        # S3에서 JSON 로드
+        json_key = 'popcorithm_with_features.json'
+        print("📋 JSON 파일 로딩 중...")
+        cached_features = load_json_from_s3(S3_BUCKET_NAME, json_key, check_size=True)
+        print(f"✅ S3 JSON 로드 완료: {len(cached_features['actors'])}명 배우")
         
-        # # 벡터 미리 변환 (메모리 효율적으로)
-        # print("🔢 벡터 로드 중...")
-        # cached_movie_vectors = load_vectors_from_s3(S3_BUCKET_NAME, 'movie_vectors.npy')
+        # 벡터 미리 변환 (메모리 효율적으로)
+        print("🔢 벡터 로드 중...")
+        cached_movie_vectors = load_vectors_from_s3(S3_BUCKET_NAME, 'movie_vectors.npy')
         
-        # # 가비지 컬렉션으로 메모리 정리
-        # gc.collect()
+        # 가비지 컬렉션으로 메모리 정리
+        gc.collect()
         
-        # print("🎉 S3 캐싱 완료! 추천 API 준비됨")
+        print("🎉 S3 캐싱 완료! 추천 API 준비됨")
         
         # data_loader의 load_all_data 함수를 직접 호출
         load_all_data()
-        # load_all_filtering_data()
+        load_all_filtering_data()
         await initialize_local_recommender_system()
 
         logger.info("추천 시스템 데이터 초기화 완료.")
