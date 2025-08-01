@@ -1,9 +1,9 @@
 import logging
 import pandas as pd
-from typing import List, Optional, Any
+from typing import List, Optional
 from fastapi import HTTPException
 from .state import fr_app_state
-from pydantic import BaseModel, Field # PopularContentResponse를 여기서도 사용하기 위해 임포트
+from pydantic import BaseModel, Field
 from .config import (
     LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS,
     MIN_INTERACTIONS_FOR_POPULARITY,
@@ -18,12 +18,10 @@ class PopularContentResponse(BaseModel):
     type: str
     poster_path: Optional[str] = None
     genres: List[str] = []
-    platforms: List[str] = [] # <--- 이 줄 추가!
+    platforms: List[str] = []
     popularity_score: Optional[float] = None
 
-# ===============================================
-# 연령대별 인기 콘텐츠 계산 로직
-# ===============================================
+
 def calculate_age_group_popularity(
     age_group_min: int,
     age_group_max: int,
@@ -107,16 +105,14 @@ def calculate_age_group_popularity(
             type=row['type'],
             poster_path=row['poster_path'],
             genres=row['genres'],
-            platforms=row['platforms'], # <--- 이 줄 추가!
+            platforms=row['platforms'],
             popularity_score=row['popularity_score']
         ))
     
     logger.info(f"연령대 {age_group_min}~{age_group_max} 인기 콘텐츠 계산 완료: {len(recommendations)}개.")
     return recommendations
 
-# ===============================================
-# 페르소나별 인기 콘텐츠 계산 로직
-# ===============================================
+
 def calculate_popular_by_persona(
     persona_id: int, 
     top_n: int = 10
@@ -203,7 +199,7 @@ def calculate_popular_by_persona(
             type=row['type'],
             poster_path=row['poster_path'],
             genres=row['genres'],
-            platforms=row['platforms'], # <--- 이 줄 추가!
+            platforms=row['platforms'],
             popularity_score=row['popularity_score']
         ))
     

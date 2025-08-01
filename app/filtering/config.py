@@ -1,6 +1,6 @@
-LIKE_WEIGHT = 5.0          # 좋아요 가중치 (사용자 제공)
-DISLIKE_WEIGHT = -5.0      # 싫어요 가중치 (사용자 제공)
-STAR_RATING_WEIGHTS = {    # 별점 가중치 (사용자 제공)
+LIKE_WEIGHT = 5.0          # 좋아요 가중치 
+DISLIKE_WEIGHT = -5.0      # 싫어요 가중치 
+STAR_RATING_WEIGHTS = {    # 별점 가중치 
     0.5: -5.0,
     1.0: -3.5,
     1.5: -2.0,

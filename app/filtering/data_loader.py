@@ -87,7 +87,7 @@ def load_all_filtering_data():
         result = db.execute(text(users_query))
         users_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         
-        # birth_date가 없는 사용자가 있을 수 있으므로 오류 처리 추가 (예: NaT 값 처리)
+        # birth_date가 없는 사용자가 있을 수 있으므로 오류 처리 추가 
         users_df['birth_date'] = pd.to_datetime(users_df['birth_date'], errors='coerce') # 유효하지 않은 날짜는 NaT로 변환
         
         # NaT 값이 있는 경우 age 계산에서 제외하거나 기본값 설정
