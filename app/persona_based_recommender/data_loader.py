@@ -15,7 +15,7 @@ def load_all_data():
     try:
         contents_query = """
         SELECT
-            c.id AS content_id, -- <<< 여기서 contentId_orig를 content_id로 변경!
+            c.id AS content_id,
             c.title,
             c.type,
             c.rating_average,

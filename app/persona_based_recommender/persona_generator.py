@@ -1,10 +1,9 @@
 import logging
 import pandas as pd
 from scipy.sparse import csr_matrix, lil_matrix
-from fastapi import APIRouter, HTTPException, Depends, status, Query
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict
-from typing import Dict, List, Any, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set
 from datetime import datetime
 from collections import defaultdict
 
@@ -24,13 +23,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 def _create_recommended_content(
-    content_data: Dict, # content_id 대신 필터링된 콘텐츠 데이터를 받습니다.
+    content_data: Dict,
     predicted_rating: Optional[float] = None,
     persona_genre_match: Optional[float] = None
 ) -> RecommendedContent:
     """
     주어진 콘텐츠 데이터 딕셔너리를 기반으로 RecommendedContent 객체를 생성합니다.
-    (이미 필터링된 DataFrame의 row에서 온 데이터를 사용합니다.)
     """
     genres_data = content_data.get('genres')
     genres_list = []
