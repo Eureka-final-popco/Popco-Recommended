@@ -1,6 +1,6 @@
 import logging
 from fastapi import APIRouter, HTTPException, Depends, status
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set, Tuple
 import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -16,7 +16,8 @@ from .config import (
 )
 from persona_based_recommender.persona_generator import (
     calculate_and_store_user_personas,
-    update_user_persona_scores   
+    update_user_persona_scores,
+    _get_user_interacted_content_tuples   
 )
 from .schemas import InitialFeedbackRequest, FeedbackRequest, RecommendationResponse, RecommendedContent, PersonaCountsResponse
 
@@ -122,6 +123,9 @@ async def onboard_user(
         logger.warning(f"사용자 {user_id}에 대한 유효한 초기 콘텐츠 반응이 없습니다.")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="유효한 초기 피드백 콘텐츠가 제공되지 않았습니다.")
     
+    interacted_content_tuples = _get_user_interacted_content_tuples(user_id)
+    logger.info(f"온보딩 시 사용자 {user_id}가 이미 상호작용한 콘텐츠 수: {len(interacted_content_tuples)}")
+
     unified_feedback = persona_generator.generate_unified_user_feedback(user_id, db)
 
     main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores_by_name = \
@@ -167,18 +171,56 @@ async def onboard_user(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="DB 저장 중 오류 발생.")
 
     recommendations: List[RecommendedContent] = []
+    final_recommendation_candidates: List[RecommendedContent] = []
+    seen_content_items_this_session: Set[Tuple[int, str]] = set() 
 
-    if main_persona_id is not None and main_persona_name != "Undetermined":
-        logger.info(f"사용자 {user_id}의 메인 페르소나({main_persona_name})를 기반으로 추천을 생성합니다.")
-        recommendations = persona_generator.update_and_get_recommendations( 
-            user_id=user_id,
+    if pbr_app_state.user_item_matrix is not None and \
+       pbr_app_state.user_item_matrix.shape[0] > 0 and \
+       user_id in pbr_app_state.user_id_to_idx_map:
+        
+        cf_recs = persona_generator.recommend_contents_cf(
+            user_id, num_recommendations=RECOMMENDATION_COUNT * 2, db=db, content_type_filter=None
+        )
+        for rec in cf_recs:
+            content_tuple = (rec.contentId, rec.type)
+            if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session: 
+                final_recommendation_candidates.append(rec)
+                seen_content_items_this_session.add(content_tuple)
+        logger.info(f"온보딩 CF 추천 시도 후 (상호작용 & 세션 중복 필터링 전): {len(cf_recs)}개, 필터링 후 추가: {len(final_recommendation_candidates)}개")
+    
+    if len(final_recommendation_candidates) < RECOMMENDATION_COUNT and main_persona_id is not None and main_persona_name != "Undetermined":
+        remaining_count = RECOMMENDATION_COUNT * 2
+        logger.info(f"온보딩 CF 추천 부족 ({len(final_recommendation_candidates)}/{RECOMMENDATION_COUNT}). 페르소나 기반 추천으로 {remaining_count}개 채움 시도.")
+        
+        persona_recs = persona_generator.get_persona_based_popular_fallback_recommendations(
+            user_id,
+            main_persona_id,
+            num_recommendations=remaining_count,
             db=db,
-            num_recommendations=RECOMMENDATION_COUNT,
             content_type_filter=None
         )
-    else:
-        logger.info(f"사용자 {user_id}의 페르소나 기반 추천 생성 불가 (페르소나 미결정), 일반 인기 추천으로 대체.")
-        recommendations = persona_generator._get_general_popular_recommendations(user_id, num_recommendations=RECOMMENDATION_COUNT, db=db)
+        for rec in persona_recs:
+            content_tuple = (rec.contentId, rec.type)
+            if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session:
+                final_recommendation_candidates.append(rec)
+                seen_content_items_this_session.add(content_tuple)
+        logger.info(f"온보딩 페르소나 기반 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
+
+    if len(final_recommendation_candidates) < RECOMMENDATION_COUNT:
+        remaining_count = RECOMMENDATION_COUNT * 3
+        logger.info(f"온보딩 페르소나 기반 추천 부족 ({len(final_recommendation_candidates)}/{RECOMMENDATION_COUNT}). 일반 인기 추천으로 {remaining_count}개 채움 시도.")
+        
+        general_recs = persona_generator._get_general_popular_recommendations(
+            user_id, num_recommendations=remaining_count, content_type_filter=None, db=db
+        )
+        for rec in general_recs:
+            content_tuple = (rec.contentId, rec.type)
+            if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session: 
+                final_recommendation_candidates.append(rec)
+                seen_content_items_this_session.add(content_tuple)
+        logger.info(f"온보딩 일반 인기 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
+
+    recommendations = final_recommendation_candidates[:RECOMMENDATION_COUNT]
 
     logger.info(f"사용자 {user_id} 온보딩 완료. {len(recommendations)}개 추천.")
 
@@ -326,35 +368,63 @@ async def submit_feedback(
         logger.error(f"피드백 및 페르소나 업데이트 중 오류 발생: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"피드백 처리 중 오류 발생: {e}")
 
+    interacted_content_tuples = _get_user_interacted_content_tuples(user_id)
+    logger.info(f"피드백 후 사용자 {user_id}가 이미 상호작용한 콘텐츠 수: {len(interacted_content_tuples)}")
+
     unified_feedback = persona_generator.generate_unified_user_feedback(user_id, db)
     main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores = \
         persona_generator.get_hybrid_persona(user_id, unified_feedback, db)
     
     recommendations: List[RecommendedContent] = []
+    final_recommendation_candidates: List[RecommendedContent] = []
+    seen_content_items_this_session: Set[Tuple[int, str]] = set()
 
     if pbr_app_state.user_item_matrix is not None and \
        pbr_app_state.user_item_matrix.shape[0] > 0 and \
        user_id in pbr_app_state.user_id_to_idx_map:
-        recommendations = persona_generator.recommend_contents_cf(
-            user_id, num_recommendations=RECOMMENDATION_COUNT, db=db, content_type_filter=content_type
+        recommendations_from_cf = persona_generator.recommend_contents_cf(
+            user_id, num_recommendations=RECOMMENDATION_COUNT * 2, db=db, content_type_filter=content_type
         )
-        logger.info(f"CF 추천 {len(recommendations)}개 추가됨. 현재 총 추천 수: {len(recommendations)}")
+        for rec in recommendations_from_cf:
+            content_tuple = (rec.contentId, rec.type)
+            if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session:
+                final_recommendation_candidates.append(rec)
+                seen_content_items_this_session.add(content_tuple)
+        logger.info(f"피드백 후 CF 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
     
-    if not recommendations and main_persona_id is not None:
-        logger.info(f"CF 추천 실패/부족. 사용자 {user_id}의 페르소나 기반 추천을 시도합니다.")
-        recommendations = persona_generator.get_persona_based_popular_fallback_recommendations( 
+    if len(final_recommendation_candidates) < RECOMMENDATION_COUNT and main_persona_id is not None:
+        remaining_count = RECOMMENDATION_COUNT * 2
+        logger.info(f"피드백 후 CF 추천 부족. 페르소나 기반 추천으로 {remaining_count}개 채움 시도.")
+        
+        persona_recs = persona_generator.get_persona_based_popular_fallback_recommendations( 
             user_id,
             main_persona_id,
-            num_recommendations=RECOMMENDATION_COUNT,
+            num_recommendations=remaining_count,
             db=db,
             content_type_filter=content_type
         )
+        for rec in persona_recs:
+            content_tuple = (rec.contentId, rec.type)
+            if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session:
+                final_recommendation_candidates.append(rec)
+                seen_content_items_this_session.add(content_tuple)
+        logger.info(f"피드백 후 페르소나 기반 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
     
-    if not recommendations:
-        logger.info(f"페르소나 기반 추천 실패/부족. 사용자 {user_id}의 일반 인기 추천을 시도합니다.")
-        recommendations = persona_generator._get_general_popular_recommendations(
-            user_id, num_recommendations=RECOMMENDATION_COUNT, content_type_filter=content_type, db=db
+    if len(final_recommendation_candidates) < RECOMMENDATION_COUNT:
+        remaining_count = RECOMMENDATION_COUNT * 3
+        logger.info(f"피드백 후 페르소나 기반 추천 부족. 일반 인기 추천으로 {remaining_count}개 채움 시도.")
+        
+        general_recs = persona_generator._get_general_popular_recommendations(
+            user_id, num_recommendations=remaining_count, content_type_filter=content_type, db=db
         )
+        for rec in general_recs:
+            content_tuple = (rec.contentId, rec.type)
+            if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session: 
+                final_recommendation_candidates.append(rec)
+                seen_content_items_this_session.add(content_tuple)
+        logger.info(f"피드백 후 일반 인기 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
+
+    recommendations = final_recommendation_candidates[:RECOMMENDATION_COUNT]
 
     logger.info(f"사용자 {user_id} 피드백 처리 완료. {len(recommendations)}개 추천.")
 
@@ -442,31 +512,33 @@ async def get_user_recommendations(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="추천 시스템 데이터가 아직 로드되지 않았거나 비어 있습니다.")
 
     try:
+        interacted_content_tuples = _get_user_interacted_content_tuples(user_id)
+        logger.info(f"사용자 {user_id}가 이미 상호작용한 콘텐츠 수: {len(interacted_content_tuples)}")
+
         unified_feedback = persona_generator.generate_unified_user_feedback(user_id, db)
         main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores = \
             persona_generator.get_hybrid_persona(user_id, unified_feedback, db)
 
-        recommendations: List[RecommendedContent] = []
-        existing_content_ids = set() 
+        final_recommendation_candidates: List[RecommendedContent] = []
+        seen_content_items_this_session: Set[Tuple[int, str]] = set()
 
         if pbr_app_state.user_item_matrix is not None and \
            pbr_app_state.user_item_matrix.shape[0] > 0 and \
            user_id in pbr_app_state.user_id_to_idx_map:
             
             cf_recs = persona_generator.recommend_contents_cf(
-                user_id, num_recommendations=RECOMMENDATION_COUNT, db=db, content_type_filter=content_type
+                user_id, num_recommendations=RECOMMENDATION_COUNT * 2, db=db, content_type_filter=content_type 
             )
             for rec in cf_recs:
-                if rec.contentId not in existing_content_ids: 
-                    recommendations.append(rec)
-                    existing_content_ids.add(rec.contentId) 
-                    if len(recommendations) >= RECOMMENDATION_COUNT: 
-                        break
-            logger.info(f"CF 추천 시도 후 {len(cf_recs)}개 중 {len(recommendations)}개 추가됨. 현재 총 추천 수: {len(recommendations)}")
+                content_tuple = (rec.contentId, rec.type)
+                if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session: 
+                    final_recommendation_candidates.append(rec)
+                    seen_content_items_this_session.add(content_tuple)
+            logger.info(f"CF 추천 시도 후 (상호작용 & 세션 중복 필터링 전): {len(cf_recs)}개, 필터링 후 추가: {len(final_recommendation_candidates)}개")
         
-        if len(recommendations) < RECOMMENDATION_COUNT and main_persona_id is not None:
-            remaining_count = RECOMMENDATION_COUNT - len(recommendations)
-            logger.info(f"CF 추천 부족 ({len(recommendations)}/{RECOMMENDATION_COUNT}). 페르소나 기반 추천으로 {remaining_count}개 채움 시도.")
+        if len(final_recommendation_candidates) < RECOMMENDATION_COUNT and main_persona_id is not None:
+            remaining_count = RECOMMENDATION_COUNT * 2 
+            logger.info(f"CF 추천 부족 ({len(final_recommendation_candidates)}/{RECOMMENDATION_COUNT}). 페르소나 기반 추천으로 {remaining_count}개 채움 시도.")
             
             persona_recs = persona_generator.get_persona_based_popular_fallback_recommendations(
                 user_id,
@@ -475,35 +547,29 @@ async def get_user_recommendations(
                 db=db,
                 content_type_filter=content_type
             )
-            added_from_persona = 0
             for rec in persona_recs:
-                if rec.contentId not in existing_content_ids:
-                    recommendations.append(rec)
-                    existing_content_ids.add(rec.contentId) 
-                    added_from_persona += 1
-                    if len(recommendations) >= RECOMMENDATION_COUNT: 
-                        break
-            logger.info(f"페르소나 기반 추천 시도 후 {len(persona_recs)}개 중 {added_from_persona}개 추가됨. 현재 총 추천 수: {len(recommendations)}")
+                content_tuple = (rec.contentId, rec.type)
+                if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session:
+                    final_recommendation_candidates.append(rec)
+                    seen_content_items_this_session.add(content_tuple)
+            logger.info(f"페르소나 기반 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
 
-        if len(recommendations) < RECOMMENDATION_COUNT:
-            remaining_count = RECOMMENDATION_COUNT - len(recommendations)
-            logger.info(f"페르소나 기반 추천 부족 ({len(recommendations)}/{RECOMMENDATION_COUNT}). 일반 인기 추천으로 {remaining_count}개 채움 시도.")
+        if len(final_recommendation_candidates) < RECOMMENDATION_COUNT:
+            remaining_count = RECOMMENDATION_COUNT * 3
+            logger.info(f"페르소나 기반 추천 부족 ({len(final_recommendation_candidates)}/{RECOMMENDATION_COUNT}). 일반 인기 추천으로 {remaining_count}개 채움 시도.")
             
             general_recs = persona_generator._get_general_popular_recommendations(
-                user_id, num_recommendations=remaining_count * 3, content_type_filter=content_type, db=db
+                user_id, num_recommendations=remaining_count, content_type_filter=content_type, db=db
             )
 
-            added_from_general = 0
             for rec in general_recs:
-                if rec.contentId not in existing_content_ids: 
-                    recommendations.append(rec)
-                    existing_content_ids.add(rec.contentId)
-                    added_from_general += 1
-                    if len(recommendations) >= RECOMMENDATION_COUNT:
-                        break
-            logger.info(f"일반 인기 추천 시도 후 {len(general_recs)}개 중 {added_from_general}개 추가됨. 현재 총 추천 수: {len(recommendations)}")
+                content_tuple = (rec.contentId, rec.type)
+                if content_tuple not in interacted_content_tuples and content_tuple not in seen_content_items_this_session: 
+                    final_recommendation_candidates.append(rec)
+                    seen_content_items_this_session.add(content_tuple)
+            logger.info(f"일반 인기 추천 시도 후 (상호작용 & 세션 중복 필터링 후): {len(final_recommendation_candidates)}개")
 
-        final_recommendations = recommendations[:RECOMMENDATION_COUNT]
+        final_recommendations = final_recommendation_candidates[:RECOMMENDATION_COUNT]
         logger.info(f"사용자 {user_id} 추천 요청 처리 완료. 최종 {len(final_recommendations)}개 추천 반환.")
 
         return RecommendationResponse(
@@ -518,6 +584,7 @@ async def get_user_recommendations(
         db.rollback() 
         logger.error(f"추천 생성 중 오류 발생: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"추천 생성 중 오류 발생: {e}")
+
 
 @persona_recommender_router.get("/persona-counts", response_model=PersonaCountsResponse, summary="각 페르소나에 속하는 사용자 수 반환")
 async def get_persona_counts(
