@@ -127,7 +127,7 @@ def calculate_user_content_matrix_sparse(
 def calculate_and_store_user_personas(
     db: Session,
     user_id: int,
-    calculated_persona_scores: Dict[int, float]
+    calculated_persona_scores: Dict[str, float] # 타입 힌트를 str로 변경했습니다 (선택 사항)
 ):
     """
     계산된 사용자 페르소나 점수를 user_personas 테이블에 저장하거나 업데이트합니다.
@@ -143,17 +143,21 @@ def calculate_and_store_user_personas(
     existing_user_personas = db.query(UserPersona).filter(UserPersona.user_id == user_id).all()
     existing_personas_map = {up.persona_id: up for up in existing_user_personas}
 
-    personas_to_add_or_update = []
     persona_ids_to_keep = set()
 
-    for persona_id, new_score in calculated_persona_scores.items():
+    for persona_id, new_score in calculated_persona_scores.items(): # 이제 persona_id에 올바른 숫자 ID가 들어옵니다.
+        # persona_name은 로깅이나 다른 목적에 필요한 경우에만 다시 매핑합니다.
+        persona_name = pbr_app_state.persona_id_to_name_map.get(persona_id) 
+        
+        # 이제 올바른 정수형 persona_id를 사용하여 쿼리합니다.
         persona = db.query(Persona).filter(Persona.persona_id == persona_id).first()
         if not persona:
-            logger.warning(f"페르소나 ID {persona_id}를 찾을 수 없습니다. 해당 페르소나 점수는 저장되지 않습니다.")
+            # 이 경고는 이제 Persona 마스터 데이터가 실제로 없는 경우에만 발생해야 합니다.
+            persona_name_for_log = pbr_app_state.persona_id_to_name_map.get(persona_id, f"Unknown ID {persona_id}")
+            logger.warning(f"DB Persona 테이블에서 페르소나 ID {persona_id} (이름: '{persona_name_for_log}')를 찾을 수 없습니다. 해당 페르소나 점수는 저장되지 않습니다.")
             continue
 
         persona_ids_to_keep.add(persona_id)
-
         if persona_id in existing_personas_map:
             # 기존 페르소나가 있다면 업데이트
             user_persona = existing_personas_map[persona_id]
@@ -161,25 +165,23 @@ def calculate_and_store_user_personas(
 
             if score_changed:
                 user_persona.score = new_score
-                logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 점수 업데이트됨 ({user_persona.score} -> {new_score}).")
+                logger.debug(f"사용자 {user_id}, 페르소나 '{persona_name}' (ID: {persona_id}): 점수 업데이트됨 ({user_persona.score} -> {new_score}).")
             else:
-                logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 점수 변화 없음 ({new_score}).")
+                logger.debug(f"사용자 {user_id}, 페르소나 '{persona_name}' (ID: {persona_id}): 점수 변화 없음 ({new_score}).")
 
-            user_persona.updated_at = current_utc_time # 점수 변화와 상관없이 updated_at 갱신
-            # personas_to_add_or_update.append(user_persona) # 변경사항을 세션에 추가
+            user_persona.updated_at = current_utc_time
 
         else:
             # 새로운 페르소나라면 삽입
             new_user_persona = UserPersona(
                 user_id=user_id,
-                persona_id=persona_id,
+                persona_id=persona_id, # 여기에도 올바른 persona_id 사용
                 score=new_score,
                 created_at=current_utc_time,
                 updated_at=current_utc_time
             )
-            # personas_to_add_or_update.append(new_user_persona)
             db.add(new_user_persona)
-            logger.debug(f"사용자 {user_id}, 페르소나 {persona_id}: 새로운 페르소나 점수 삽입됨 ({new_score}).")
+            logger.debug(f"사용자 {user_id}, 페르소나 '{persona_name}' (ID: {persona_id}): 새로운 페르소나 점수 삽입됨 ({new_score}).")
 
     personas_to_delete = [
         up for up in existing_user_personas
@@ -343,6 +345,8 @@ def update_user_persona_scores(
     # 2. 통합 피드백 기반 페르소나 점수 계산
     calculated_persona_scores_by_name = calculate_persona_scores_from_feedback(user_id, unified_feedback)
 
+    logger.info(f"DEBUG: calculate_persona_scores_by_name 결과: {calculated_persona_scores_by_name}")
+    
     # 3. 페르소나 이름 -> ID 매핑을 사용하여 ID 기반 딕셔너리 생성
     calculated_persona_scores_by_id = {}
     for name, score in calculated_persona_scores_by_name.items():

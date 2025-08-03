@@ -134,15 +134,29 @@ async def onboard_user(
     else:
         logger.warning(f"사용자 {user_id}에 대한 유효한 초기 콘텐츠 반응이 없습니다.")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="유효한 초기 피드백 콘텐츠가 제공되지 않았습니다.")
+    
+    #3. 페르소나 계산 및 DB/pbr_app_state 업데이트
+    unified_feedback = persona_generator.generate_unified_user_feedback(user_id, db)
 
-    # 3. 페르소나 계산 및 DB/pbr_app_state 업데이트
-    unified_feedback = persona_generator.generate_unified_user_feedback(user_id, db) # db 인자 전달
+    # get_hybrid_persona는 '페르소나 이름'을 키로 하는 딕셔너리(all_personas_scores_by_name)를 반환합니다.
+    main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores_by_name = \
+        persona_generator.get_hybrid_persona(user_id, unified_feedback, db)
 
-    main_persona_id, sub_persona_id, main_persona_name, sub_persona_name, all_personas_scores = \
-        persona_generator.get_hybrid_persona(user_id, unified_feedback, db) # db 인자 전달
+    calculated_persona_scores_by_id = {}
+    for name, score in all_personas_scores_by_name.items():
+        normalized_name = name.strip() # 혹시 모를 공백 제거
+        if normalized_name in pbr_app_state.persona_name_to_id_map:
+            persona_id = pbr_app_state.persona_name_to_id_map[normalized_name]
+            calculated_persona_scores_by_id[persona_id] = score
+        else:
+            logger.warning(
+                f"경고: 온보딩 중 페르소나 이름 '{name}' (정규화: '{normalized_name}')이(가) "
+                f"pbr_app_state.persona_name_to_id_map에서 찾아지지 않아 해당 점수는 저장되지 않습니다. "
+                f"현재 매핑된 키: {list(pbr_app_state.persona_name_to_id_map.keys())}"
+            )
 
     # calculate_and_store_user_personas 호출 (db.commit()은 나중에)
-    calculate_and_store_user_personas(db, user_id=user_id, calculated_persona_scores=all_personas_scores)
+    calculate_and_store_user_personas(db, user_id=user_id, calculated_persona_scores=calculated_persona_scores_by_id)
     
     try:
         db.commit()
@@ -193,13 +207,13 @@ async def onboard_user(
 
     # all_personas_scores의 키를 페르소나 이름으로 변환하고 점수를 1-100으로 정규화
     normalized_and_named_scores = {}
-    if all_personas_scores:
-        total_score = sum(all_personas_scores.values())
+    if all_personas_scores_by_name:
+        total_score = sum(all_personas_scores_by_name.values())
         
         # pbr_app_state.persona_df에서 페르소나 ID와 이름 매핑
         persona_id_to_name = pbr_app_state.persona_df.set_index('persona_id')['name'].to_dict() # 'persona_name'이 아니라 'name' 컬럼 사용
 
-        for persona_id, score in all_personas_scores.items():
+        for persona_id, score in all_personas_scores_by_name.items():
             persona_name = persona_id_to_name.get(persona_id, f"{persona_id}")
             if total_score > 0:
                 normalized_score = (score / total_score) * 100
