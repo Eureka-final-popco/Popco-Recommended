@@ -172,7 +172,11 @@ def calculate_and_store_user_personas(
     try:
         db.flush()
         logger.info(f"DB: 사용자 [{user_id}]의 페르소나 점수 변경사항 플러시 완료.")
+
+        db.commit()
+        logger.info(f"DB: 사용자 [{user_id}]의 페르소나 점수 변경사항 커밋 완료.")
     except Exception as e:
+        db.rollback()
         logger.error(f"DB 변경사항 플러시 중 오류 발생: {e}", exc_info=True)
         raise
 
