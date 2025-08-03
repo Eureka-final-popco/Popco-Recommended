@@ -1,6 +1,5 @@
 import logging
 import pandas as pd
-from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from .state import pbr_app_state
@@ -9,25 +8,14 @@ from .config import LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
-PERSONA_EXCLUDED_GENRES_MAP = {
-    "액션헌터": ["가족", "키즈", "로맨스", "연속극", "토크", "음악", "다큐멘터리"], # 정적인 영화 싫어함
-    "무비 셜록": ["가족", "키즈", "로맨스", "음악", "리얼리티", "토크", "연속극"], # 정보/논리 중심, 가벼운 장르 선호 안함
-    "시네파 울보": ["공포", "스릴러", "액션", "SF", "범죄", "전쟁"], # 감정/감동 중심, 자극적 장르 제외
-    "온기 수집가": ["공포", "스릴러", "전쟁", "범죄", "액션"], # 자극적인 것 피함
-    "이세계 유랑자": ["리얼리티", "뉴스", "다큐멘터리", "로맨스", "토크", "연속극", "가족", "키즈"], # 현실 탈출, 상상력 중시
-    "무서워도본다맨": ["가족", "키즈", "로맨스", "음악", "리얼리티", "토크", "연속극"], # 공포/스릴 중심, 반대 장르 제외
-    "레트로 캡틴": ["액션", "SF", "판타지", "키즈", "리얼리티", "토크", "연속극"], # 고전/아날로그 감성 중시, 현대적/가벼운 장르 제외
-}
-
 def load_all_data():
     logger.info("모든 데이터 로드 시작...")
     
     db: Session = SessionLocal() 
     try:
-        # Contents 데이터 로드 (genres 컬럼 포함하도록 수정)
         contents_query = """
         SELECT
-            c.id AS content_id, -- <<< 여기서 contentId_orig를 content_id로 변경!
+            c.id AS content_id,
             c.title,
             c.type,
             c.rating_average,
@@ -49,37 +37,31 @@ def load_all_data():
         pbr_app_state.contents_df = contents_df
         logger.info(f"Contents 데이터 로드 완료: {len(contents_df)}개.")
 
-        # Reactions 데이터 로드 (이전 수정사항 그대로 유지, 잘 작동하는 부분)
         result = db.execute(text("SELECT user_id, content_id, reaction, type FROM content_reactions"))
         reactions_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         pbr_app_state.reactions_df = reactions_df
         logger.info(f"Reactions 데이터 로드 완료: {len(reactions_df)}개.")
 
-        # Reviews 데이터 로드 (이전 수정사항 그대로 유지, 잘 작동하는 부분)
         result = db.execute(text("SELECT user_id, content_id, type, score FROM reviews"))
         reviews_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         pbr_app_state.reviews_df = reviews_df
         logger.info(f"Reviews 데이터 로드 완료: {len(reviews_df)}개.")
 
-        # UserPersonas 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM user_personas"))
         all_user_personas_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         pbr_app_state.all_user_personas_df = all_user_personas_df
         logger.info(f"UserPersonas 데이터 로드 완료: {len(all_user_personas_df)}개.")
 
-        # Personas 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM personas"))
         persona_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         pbr_app_state.persona_df = persona_df
         logger.info(f"Personas 데이터 로드 완료: {len(persona_df)}개.")
 
-        # PersonaGenres 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM persona_genres"))
         persona_genres_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         pbr_app_state.persona_genres_df = persona_genres_df
         logger.info(f"personaGenres 데이터 로드 완료: {len(persona_genres_df)}개.")
 
-        # Genres 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM genres"))
         genres_df = pd.DataFrame(result.fetchall(), columns=result.keys())
         pbr_app_state.genres_df = genres_df
@@ -88,21 +70,19 @@ def load_all_data():
         pbr_app_state.genre_name_to_id_map = {v: k for k, v in pbr_app_state.genre_id_to_name_map.items()}
         logger.info(f"Genres 데이터 로드 완료: {len(genres_df)}개.")
 
-        # 페르소나 상세 정보 맵 생성 (변경 없음)
+        all_genre_names = set(genres_df['name'].tolist())
+
         pbr_app_state.persona_id_to_name_map = pd.Series(persona_df.name.values, index=persona_df.persona_id).to_dict()
         pbr_app_state.persona_name_to_id_map = {v: k for k, v in pbr_app_state.persona_id_to_name_map.items()}
-        # ⬆️ 이 줄 바로 뒤에 다음을 추가합니다.
         logger.info(f"DEBUG: pbr_app_state.persona_name_to_id_map 초기화 완료: {pbr_app_state.persona_name_to_id_map}")
 
-        # PersonaOptions 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM persona_options"))
         persona_options_df = pd.DataFrame(result.fetchall(), columns=result.keys())
-        pbr_app_state.persona_options_df = persona_options_df # 추가
+        pbr_app_state.persona_options_df = persona_options_df
 
-        # Options 데이터 로드 (변경 없음)
         result = db.execute(text("SELECT * FROM options"))
         options_df = pd.DataFrame(result.fetchall(), columns=result.keys())
-        pbr_app_state.options_df = options_df # 추가
+        pbr_app_state.options_df = options_df 
         
         logger.info(f"PersonaOptions 데이터 로드 완료: {len(persona_options_df)}개.")
         logger.info(f"Options 데이터 로드 완료: {len(options_df)}개.")
@@ -110,26 +90,18 @@ def load_all_data():
         pbr_app_state.user_qa_answers_df = pd.DataFrame(columns=['user_id', 'question_id', 'option_id', 'answer'])
         logger.info("User QA Answers 데이터 로드 (빈 DataFrame으로 초기화) 완료.")
 
-        # ====================================================================
-        # 핵심 추가: 사용자 ID 및 콘텐츠 ID 매핑 생성 및 pbr_app_state에 저장
-        # ====================================================================
-        # 모든 고유 사용자 ID 수집
         all_user_ids = pd.concat([pbr_app_state.reactions_df['user_id'], pbr_app_state.reviews_df['user_id']]).unique()
         pbr_app_state.user_id_to_idx_map = {user_id: idx for idx, user_id in enumerate(all_user_ids)}
         pbr_app_state.user_idx_to_id_map = {idx: user_id for user_id, idx in pbr_app_state.user_id_to_idx_map.items()}
         pbr_app_state.all_user_ids = all_user_ids.tolist()
         logger.info(f"사용자 매핑 완료: {len(all_user_ids)}명.")
 
-        # 모든 고유 콘텐츠 ID (original_id, type) 튜플 수집
-        # pbr_app_state.contents_df에서 contentId_orig를 content_id로 변경!
-        all_content_tuples = pbr_app_state.contents_df[['content_id', 'type']].drop_duplicates().apply(tuple, axis=1).tolist() # <<< 여기도 content_id로 변경!
+        all_content_tuples = pbr_app_state.contents_df[['content_id', 'type']].drop_duplicates().apply(tuple, axis=1).tolist()
         pbr_app_state.content_id_to_idx_map = {content_tuple: idx for idx, content_tuple in enumerate(all_content_tuples)}
         pbr_app_state.idx_to_content_id_map = {idx: content_tuple for content_tuple, idx in pbr_app_state.content_id_to_idx_map.items()}
         logger.info(f"콘텐츠 매핑 완료: {len(all_content_tuples)}개.")
 
-
         try:
-            # 3. Reactions 데이터 처리 (변경 없음)
             reactions_df_processed = pbr_app_state.reactions_df.copy()
 
             reactions_df_processed['score'] = reactions_df_processed['reaction'].apply(
@@ -138,7 +110,6 @@ def load_all_data():
             reactions_df_processed.rename(columns={'type': 'content_type'}, inplace=True)
             reactions_df_processed = reactions_df_processed[['user_id', 'content_id', 'content_type', 'score']]
 
-            # 2. Reviews 데이터 처리 (변경 없음)
             reviews_df_processed = pbr_app_state.reviews_df.copy()
             reviews_df_processed['score'] = reviews_df_processed['score'].apply(
                 lambda x: STAR_RATING_WEIGHTS.get(x, 0.0)
@@ -146,10 +117,8 @@ def load_all_data():
             reviews_df_processed.rename(columns={'type': 'content_type'}, inplace=True)
             reviews_df_processed = reviews_df_processed[['user_id', 'content_id', 'content_type', 'score']]
 
-            # 3. Reactions와 Reviews 데이터 통합 (변경 없음)
             all_interactions_df = pd.concat([reactions_df_processed, reviews_df_processed], ignore_index=True)
 
-            # 4. 사용자 및 콘텐츠 인덱스 매핑 적용 (변경 없음)
             all_interactions_df['user_idx'] = all_interactions_df['user_id'].map(pbr_app_state.user_id_to_idx_map)
             
             all_interactions_df['content_tuple'] = list(zip(all_interactions_df['content_id'], all_interactions_df['content_type']))
@@ -193,10 +162,7 @@ def load_all_data():
             logger.info(f"사용자 ID {test_user_id} 매핑 인덱스: {pbr_app_state.user_id_to_idx_map[test_user_id]}")
         else:
             logger.info(f"사용자 ID {test_user_id} 매핑 존재하지 않음.")
-        # ====================================================================
-
-
-        # 페르소나 상세 정보 맵 생성 (변경 없음)
+            
         pbr_app_state.persona_id_to_name_map = pd.Series(persona_df.name.values, index=persona_df.persona_id).to_dict()
         pbr_app_state.persona_name_to_id_map = {v: k for k, v in pbr_app_state.persona_id_to_name_map.items()}
 
@@ -209,12 +175,22 @@ def load_all_data():
             description = row['description']
 
             keywords = []
-            persona_relevant_genres = persona_genres_df[persona_genres_df['persona_id'] == persona_id]
-            for _, genre_row in persona_relevant_genres.iterrows():
+            
+            persona_relevant_genres_df = persona_genres_df[
+                (persona_genres_df['persona_id'] == persona_id) &
+                (persona_genres_df['score'] > 0)
+            ]
+            
+            relevant_genre_names_for_persona = set()
+            for _, genre_row in persona_relevant_genres_df.iterrows():
                 genre_id = genre_row['genre_id']
-                genre_name = pbr_app_state.genre_id_to_name_map.get(genre_id) 
+                genre_name = pbr_app_state.genre_id_to_name_map.get(genre_id)
                 if genre_name:
                     keywords.append(genre_name)
+                    relevant_genre_names_for_persona.add(genre_name)
+
+            excluded_genres = list(all_genre_names - relevant_genre_names_for_persona)
+
 
             qa_mapping = {}
             persona_qa_options = persona_options_df[persona_options_df['persona_id'] == persona_id]
@@ -227,20 +203,19 @@ def load_all_data():
                         best_option_row = q_data.loc[q_data['score'].idxmax()]
                         qa_mapping[str(q_id)] = str(best_option_row['content'])
 
-            current_excluded_genres = PERSONA_EXCLUDED_GENRES_MAP.get(persona_name, [])
-
             pbr_app_state.persona_details_map[persona_id] = {
                 'persona_name': persona_name,
                 'description': description,
-                'keywords': keywords,
+                'keywords': keywords, 
                 'qa_mapping': qa_mapping,
-                'excluded_genres': current_excluded_genres
+                'excluded_genres': excluded_genres 
             }
 
         logging.info("모든 데이터 로드 및 pbr_app_state 업데이트 완료.")
 
         print(pbr_app_state.persona_details_map.get(4, {}).get('persona_name'))
-        print(pbr_app_state.persona_details_map.get(4, {}).get('keywords'))
+        print(f"온기 수집가 키워드 장르: {pbr_app_state.persona_details_map.get(4, {}).get('keywords')}")
+        print(f"온기 수집가 제외 장르: {pbr_app_state.persona_details_map.get(4, {}).get('excluded_genres')}")
 
     except Exception as e:
         logging.error(f"데이터 로드 중 오류 발생: {e}", exc_info=True)
