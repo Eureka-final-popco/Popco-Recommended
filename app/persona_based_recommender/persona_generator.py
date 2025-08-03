@@ -108,7 +108,7 @@ def calculate_user_content_matrix_sparse(
 def calculate_and_store_user_personas(
     db: Session,
     user_id: int,
-    calculated_persona_scores: Dict[str, float]
+    calculated_persona_scores: Dict[int, float]
 ):
     """
     계산된 사용자 페르소나 점수를 user_personas 테이블에 저장하거나 업데이트합니다.
