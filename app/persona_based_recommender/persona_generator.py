@@ -944,3 +944,15 @@ def recommend_contents_cf(
 
     logger.info(f"사용자 {user_id}에게 {len(recommendations)}개의 협업 필터링 추천 생성 완료.")
     return recommendations
+
+def _get_user_interacted_content_tuples(user_id: int) -> Set[Tuple[int, str]]:
+    """
+    주어진 사용자가 이미 반응하거나 리뷰한 모든 콘텐츠의 (content_id, content_type) 튜플 집합을 반환합니다.
+    """
+    user_reactions_df = pbr_app_state.reactions_df[pbr_app_state.reactions_df['user_id'] == user_id]
+    reacted_content_tuples = set(zip(user_reactions_df['content_id'], user_reactions_df['type']))
+
+    user_reviews_df = pbr_app_state.reviews_df[pbr_app_state.reviews_df['user_id'] == user_id]
+    reviewed_content_tuples = set(zip(user_reviews_df['content_id'], user_reviews_df['type']))
+
+    return reacted_content_tuples.union(reviewed_content_tuples)
