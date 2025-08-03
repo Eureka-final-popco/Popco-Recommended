@@ -1,7 +1,6 @@
 import pandas as pd
 from typing import Optional, Any, Dict, Tuple, List
 import logging
-# import redis # Redis를 사용하지 않으므로 이 라인은 제거합니다.
 
 logger = logging.getLogger(__name__)
 

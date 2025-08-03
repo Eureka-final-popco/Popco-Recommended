@@ -8,16 +8,6 @@ from .config import LIKE_WEIGHT, DISLIKE_WEIGHT, STAR_RATING_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
-PERSONA_EXCLUDED_GENRES_MAP = {
-    "액션헌터": ["가족", "키즈", "로맨스", "연속극", "토크", "음악", "다큐멘터리"],
-    "무비 셜록": ["가족", "키즈", "로맨스", "음악", "리얼리티", "토크", "연속극"],
-    "시네파 울보": ["공포", "스릴러", "액션", "SF", "범죄", "전쟁"],
-    "온기 수집가": ["공포", "스릴러", "전쟁", "범죄", "액션"], 
-    "이세계 유랑자": ["리얼리티", "뉴스", "다큐멘터리", "로맨스", "토크", "연속극", "가족", "키즈"],
-    "무서워도본다맨": ["가족", "키즈", "로맨스", "음악", "리얼리티", "토크", "연속극"],
-    "레트로 캡틴": ["액션", "SF", "판타지", "키즈", "리얼리티", "토크", "연속극"],
-}
-
 def load_all_data():
     logger.info("모든 데이터 로드 시작...")
     
@@ -79,6 +69,8 @@ def load_all_data():
         pbr_app_state.genre_id_to_name_map = pd.Series(genres_df.name.values, index=genres_df.id).to_dict()
         pbr_app_state.genre_name_to_id_map = {v: k for k, v in pbr_app_state.genre_id_to_name_map.items()}
         logger.info(f"Genres 데이터 로드 완료: {len(genres_df)}개.")
+
+        all_genre_names = set(genres_df['name'].tolist())
 
         pbr_app_state.persona_id_to_name_map = pd.Series(persona_df.name.values, index=persona_df.persona_id).to_dict()
         pbr_app_state.persona_name_to_id_map = {v: k for k, v in pbr_app_state.persona_id_to_name_map.items()}
@@ -183,12 +175,22 @@ def load_all_data():
             description = row['description']
 
             keywords = []
-            persona_relevant_genres = persona_genres_df[persona_genres_df['persona_id'] == persona_id]
-            for _, genre_row in persona_relevant_genres.iterrows():
+            
+            persona_relevant_genres_df = persona_genres_df[
+                (persona_genres_df['persona_id'] == persona_id) &
+                (persona_genres_df['score'] > 0)
+            ]
+            
+            relevant_genre_names_for_persona = set()
+            for _, genre_row in persona_relevant_genres_df.iterrows():
                 genre_id = genre_row['genre_id']
-                genre_name = pbr_app_state.genre_id_to_name_map.get(genre_id) 
+                genre_name = pbr_app_state.genre_id_to_name_map.get(genre_id)
                 if genre_name:
                     keywords.append(genre_name)
+                    relevant_genre_names_for_persona.add(genre_name)
+
+            excluded_genres = list(all_genre_names - relevant_genre_names_for_persona)
+
 
             qa_mapping = {}
             persona_qa_options = persona_options_df[persona_options_df['persona_id'] == persona_id]
@@ -201,20 +203,19 @@ def load_all_data():
                         best_option_row = q_data.loc[q_data['score'].idxmax()]
                         qa_mapping[str(q_id)] = str(best_option_row['content'])
 
-            current_excluded_genres = PERSONA_EXCLUDED_GENRES_MAP.get(persona_name, [])
-
             pbr_app_state.persona_details_map[persona_id] = {
                 'persona_name': persona_name,
                 'description': description,
-                'keywords': keywords,
+                'keywords': keywords, 
                 'qa_mapping': qa_mapping,
-                'excluded_genres': current_excluded_genres
+                'excluded_genres': excluded_genres 
             }
 
         logging.info("모든 데이터 로드 및 pbr_app_state 업데이트 완료.")
 
         print(pbr_app_state.persona_details_map.get(4, {}).get('persona_name'))
-        print(pbr_app_state.persona_details_map.get(4, {}).get('keywords'))
+        print(f"온기 수집가 키워드 장르: {pbr_app_state.persona_details_map.get(4, {}).get('keywords')}")
+        print(f"온기 수집가 제외 장르: {pbr_app_state.persona_details_map.get(4, {}).get('excluded_genres')}")
 
     except Exception as e:
         logging.error(f"데이터 로드 중 오류 발생: {e}", exc_info=True)
