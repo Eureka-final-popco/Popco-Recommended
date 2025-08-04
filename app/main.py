@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 # main.py
 import boto3
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -35,7 +35,7 @@ from popcorithm.popcorithm import calculate_user_preferences
 from popcorithm.calc_cosine import calculate_recommendations, load_movie_metadata_with_vectors
 from content_based_recommender.contents_recommender_py import ImprovedMovieRecommendationSystem
 from content_based_recommender.schemas import RecommendRequest, ContentRecommendationListResponse, RecommendationListResponse
-from content_based_recommender.data_saver import get_existing_recommendations, save_recommendations_to_db, get_top_ranked_content, build_recommendation_responses, check_user_exists
+from content_based_recommender.database_saver import get_existing_recommendations, save_recommendations_to_db, get_top_ranked_content, build_recommendation_responses, check_user_exists
 
 # from .popcorithm.create_popcorithm_csv import create_movie_metadata_csv, create_metadata_only_csv
 # from .popcorithm.get_user_pattern import get_user_recent_activities
@@ -150,15 +150,9 @@ async def initialize_local_recommender_system():
     logger.info("🔧 로컬 추천 시스템 초기화 시작...")
 
     try:
-        # Docker 환경에서는 /app이 작업 디렉토리
         current_file_dir = Path(__file__).resolve().parent  # /app
         
-        # data_processing 디렉토리가 /app과 같은 레벨에 있다면
-        data_file_path = current_file_dir / 'content_based_recommender' / 'content_data.csv'  # /app/data_processing/content_data.csv
-        
-        # 또는 상위 디렉토리에 있다면 이렇게:
-        # project_root = current_file_dir.parent  # Docker에서는 필요 없을 수 있음
-        # data_file_path = project_root / 'data_processing' / 'content_data.csv'
+        data_file_path = current_file_dir / 'content_based_recommender' / 'content_data.csv' 
         
         abs_data_file_path = str(data_file_path)
 
@@ -421,7 +415,7 @@ def recommends_by_popcorithm(user_id: int, limit: int):
         print("\n=== 전체 스택 트레이스 ===")
         traceback.print_exc()  # 콘솔에 출력
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @app.post("/recommends/contents", response_model=RecommendationListResponse, tags=["추천 시스템"])
 async def recommend_movies_api(request: RecommendRequest, db: Session = Depends(get_db)):
     if recommender_system is None:

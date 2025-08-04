@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from typing import List, Optional
+import math
 import traceback
 from fastapi import HTTPException, status
 from datetime import date, timedelta
@@ -86,6 +87,10 @@ def get_existing_recommendations(
 
                 if reaction_entry:
                     user_reaction = reaction_entry.reaction.name  # Enum → 문자열 변환 (예: 'Like' 또는 'Dislike')
+
+            poster_path = recommended.poster_path
+            if isinstance(poster_path, float) and math.isnan(poster_path):
+                poster_path = None
 
             result.append(ContentResponse(
                 content_id=recommended.id,
