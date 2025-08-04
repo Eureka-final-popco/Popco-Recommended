@@ -96,7 +96,7 @@ def get_existing_recommendations(
                 content_id=recommended.id,
                 content_type=recommended.type,
                 title=recommended.title,
-                poster_path=recommended.poster_path,
+                poster_path=poster_path,
                 user_reaction=user_reaction
             ))
 
