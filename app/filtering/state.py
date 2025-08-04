@@ -18,7 +18,6 @@ class FilteringAppState:
         self.persona_options_df: Optional[pd.DataFrame] = None
         self.options_df: Optional[pd.DataFrame] = None
         self.user_qa_answers_df: Optional[pd.DataFrame] = None
-        self.users_df: Optional[pd.DataFrame] = None
 
         # 매핑
         self.user_id_to_idx_map: Optional[Dict[int, int]] = None
