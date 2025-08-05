@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 # main.py
 import boto3
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -20,7 +20,7 @@ import traceback
 from contextlib import asynccontextmanager
 import pandas as pd
 import logging
-import gc  # 가비지 컬렉션을 위해 추가
+import gc 
 
 from config import settings
 from database import check_db_connection, get_db
@@ -35,7 +35,7 @@ from popcorithm.popcorithm import calculate_user_preferences
 from popcorithm.calc_cosine import calculate_recommendations, load_movie_metadata_with_vectors
 from content_based_recommender.contents_recommender_py import ImprovedMovieRecommendationSystem
 from content_based_recommender.schemas import RecommendRequest, ContentRecommendationListResponse, RecommendationListResponse
-from content_based_recommender.data_saver import get_existing_recommendations, save_recommendations_to_db, get_top_ranked_content, build_recommendation_responses, check_user_exists
+from content_based_recommender.database_saver import get_existing_recommendations, save_recommendations_to_db, get_top_ranked_content, build_recommendation_responses, check_user_exists
 
 # from .popcorithm.create_popcorithm_csv import create_movie_metadata_csv, create_metadata_only_csv
 # from .popcorithm.get_user_pattern import get_user_recent_activities
@@ -46,6 +46,9 @@ from persona_based_recommender.state import pbr_app_state
 from persona_based_recommender.persona_router import persona_recommender_router
 from persona_based_recommender.data_loader import load_all_data
 
+from filtering.filtering_router import filtering_recommender_router
+from filtering.data_loader import load_all_filtering_data
+
 APP_ROOT_DIR = Path(__file__).parent # '/app'
 S3_BUCKET_NAME = settings.MY_AWS_S3_BUCKET_NAME
 s3 = boto3.client(
@@ -55,7 +58,7 @@ s3 = boto3.client(
     region_name=settings.MY_AWS_S3_REGION
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 cached_movie_df = None
@@ -150,15 +153,9 @@ async def initialize_local_recommender_system():
     logger.info("🔧 로컬 추천 시스템 초기화 시작...")
 
     try:
-        # Docker 환경에서는 /app이 작업 디렉토리
         current_file_dir = Path(__file__).resolve().parent  # /app
         
-        # data_processing 디렉토리가 /app과 같은 레벨에 있다면
-        data_file_path = current_file_dir / 'content_based_recommender' / 'content_data.csv'  # /app/data_processing/content_data.csv
-        
-        # 또는 상위 디렉토리에 있다면 이렇게:
-        # project_root = current_file_dir.parent  # Docker에서는 필요 없을 수 있음
-        # data_file_path = project_root / 'data_processing' / 'content_data.csv'
+        data_file_path = current_file_dir / 'content_based_recommender' / 'content_data.csv' 
         
         abs_data_file_path = str(data_file_path)
 
@@ -253,6 +250,7 @@ async def lifespan(app: FastAPI):
         
         # data_loader의 load_all_data 함수를 직접 호출
         load_all_data()
+        load_all_filtering_data()
         await initialize_local_recommender_system()
 
         logger.info("추천 시스템 데이터 초기화 완료.")
@@ -277,6 +275,7 @@ app.add_middleware(
 )
 
 app.include_router(persona_recommender_router)
+app.include_router(filtering_recommender_router, prefix="/recommends/filters")
 
 @app.get("/", tags=["기본"])
 def root():
@@ -421,7 +420,7 @@ def recommends_by_popcorithm(user_id: int, limit: int):
         print("\n=== 전체 스택 트레이스 ===")
         traceback.print_exc()  # 콘솔에 출력
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @app.post("/recommends/contents", response_model=RecommendationListResponse, tags=["추천 시스템"])
 async def recommend_movies_api(request: RecommendRequest, db: Session = Depends(get_db)):
     if recommender_system is None:
