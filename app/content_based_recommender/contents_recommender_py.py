@@ -559,10 +559,10 @@ class ImprovedMovieRecommendationSystem:
         # 1. 기본 가중치 설정 (총합 100%)
         weights = {
             'kobert': 0.20,
-            'overview_tfidf': 0.35,
+            'overview_tfidf': 0.34,
             'title': 0.10,  # 제목 유사도 문제 해결 전까지는 낮게 유지
-            'keywords': 0.20, # 키워드 중요성을 높임
-            'genre': 0.25   # 장르 중요성을 높임
+            'keywords': 0.13, # 키워드 중요성을 높임
+            'genre': 0.23   # 장르 중요성을 높임
         }
 
         # 모든 가중치 조정은 상대적으로 이루어지므로, 총합이 1이 되도록 조정하는 것이 중요합니다.
@@ -716,23 +716,3 @@ class ImprovedMovieRecommendationSystem:
             print(f"content_id: {movie['content_id']}, content_type: {movie['content_type']}")
             print(f"   총 유사도: {movie['total_similarity']:.3f}")
             print(f"   콘텐츠 포스터: {movie['poster_path']}")
-
-if __name__ == "__main__":
-    # 데이터셋 로드 (실제 경로에 맞게 수정 필요)
-    movies_df = pd.read_csv('content_data.csv', encoding='utf-8-sig')
-    print(f"✅ 'content_data.csv' 파일 로드 성공. 총 {len(movies_df)}개 데이터.")
-    
-    # 개선된 추천 시스템 초기화
-    recommender = ImprovedMovieRecommendationSystem(cache_dir_name="./cached_features")
-    
-    # 데이터 전처리
-    recommender.prepare_data(movies_df)
-    
-    # 적응적 가중치로 추천 실행
-    recommendations1 = recommender.recommend_movies(
-        content_id= 5707,
-        content_type= "tv",
-        top_n=8,
-        use_adaptive_weights=True
-    )
-    recommender.display_recommendations(recommendations1)
