@@ -29,7 +29,7 @@ from popcorithm.models import (
     RecommendationResponse
 )
 
-from popcorithm.create_popcorithm_csv import create_movie_metadata_csv
+from popcorithm.create_popcorithm_csv import create_metadata_only_csv, create_movie_metadata_csv
 from popcorithm.get_user_pattern import get_user_recent_activities
 from popcorithm.popcorithm import calculate_user_preferences
 from popcorithm.calc_cosine import calculate_recommendations, load_movie_metadata_with_vectors
@@ -224,7 +224,7 @@ async def lifespan(app: FastAPI):
     print("🚀 영화 데이터 캐싱 시작...")
     
     try:
-        # S3에서 CSV 로드 (청크 크기 조정 가능)
+        # # S3에서 CSV 로드 (청크 크기 조정 가능)
         csv_key = 'popcorithm_contents_metadata.csv'
         print("📊 CSV 파일 로딩 중...")
         cached_movie_df = load_csv_from_s3(S3_BUCKET_NAME, csv_key, chunksize=5000)  # 청크 크기를 5000으로 설정
