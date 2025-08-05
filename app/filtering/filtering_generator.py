@@ -37,7 +37,6 @@ def calculate_age_group_popularity(
        fr_app_state.reviews_df is None or fr_app_state.contents_df is None:
         raise HTTPException(status_code=503, detail="필요한 데이터가 아직 로드되지 않았습니다.")
 
-    # 1. 해당 연령대 사용자 필터링
     target_users_df = fr_app_state.users_df[
         (fr_app_state.users_df['age'] >= age_group_min) & 
         (fr_app_state.users_df['age'] <= age_group_max)
@@ -48,7 +47,6 @@ def calculate_age_group_popularity(
 
     target_user_ids = target_users_df['user_id'].tolist()
 
-    # 2. 해당 사용자들의 반응 데이터 필터링
     user_reactions = fr_app_state.reactions_df[
         fr_app_state.reactions_df['user_id'].isin(target_user_ids)
     ].copy()
@@ -60,7 +58,6 @@ def calculate_age_group_popularity(
         logger.warning(f"연령대 {age_group_min}~{age_group_max} 사용자의 반응 데이터가 없습니다.")
         return []
 
-    # 3. 반응 점수화 및 통합
     user_reactions['score'] = user_reactions['reaction'].apply(
         lambda x: LIKE_WEIGHT if x == 'LIKE' else (DISLIKE_WEIGHT if x == 'DISLIKE' else 0)
     )
@@ -73,7 +70,6 @@ def calculate_age_group_popularity(
 
     all_interactions = pd.concat([user_reactions_processed, user_reviews_processed], ignore_index=True)
     
-    # 4. 콘텐츠별 인기 점수 집계
     content_popularity = all_interactions.groupby(['content_id', 'type']).agg(
         total_score=('score', 'sum'),
         interaction_count=('score', 'count')
@@ -86,10 +82,8 @@ def calculate_age_group_popularity(
         logger.warning(f"연령대 {age_group_min}~{age_group_max}의 충분한 반응을 가진 인기 콘텐츠가 없습니다.")
         return []
 
-    # 5. 상위 N개 콘텐츠 선택
     top_contents = content_popularity.nlargest(top_n, 'popularity_score')
 
-    # 6. 콘텐츠 정보 병합 및 응답 형식으로 변환
     merged_data = pd.merge(
         top_contents,
         fr_app_state.contents_df,
@@ -131,7 +125,6 @@ def calculate_popular_by_persona(
     if persona_name is None:
         raise HTTPException(status_code=404, detail=f"페르소나 ID {persona_id}를 찾을 수 없습니다.")
 
-    # 1. 해당 페르소나에 속하는 사용자 ID 찾기
     main_persona_ids_per_user = fr_app_state.all_user_personas_df.loc[
         fr_app_state.all_user_personas_df.groupby('user_id')['score'].idxmax()
     ]
@@ -142,7 +135,6 @@ def calculate_popular_by_persona(
         logger.warning(f"페르소나 '{persona_name}'에 해당하는 사용자가 없습니다.")
         return []
 
-    # 2. 해당 사용자들의 반응 데이터 필터링
     user_reactions = fr_app_state.reactions_df[
         fr_app_state.reactions_df['user_id'].isin(target_user_ids)
     ].copy()
@@ -154,7 +146,6 @@ def calculate_popular_by_persona(
         logger.warning(f"페르소나 '{persona_name}' 사용자의 반응 데이터가 없습니다.")
         return []
 
-    # 3. 반응 점수화 및 통합
     user_reactions['score'] = user_reactions['reaction'].apply(
         lambda x: LIKE_WEIGHT if x == 'LIKE' else (DISLIKE_WEIGHT if x == 'DISLIKE' else 0)
     )
@@ -167,7 +158,6 @@ def calculate_popular_by_persona(
 
     all_interactions = pd.concat([user_reactions_processed, user_reviews_processed], ignore_index=True)
     
-    # 4. 콘텐츠별 인기 점수 집계
     content_popularity = all_interactions.groupby(['content_id', 'type']).agg(
         total_score=('score', 'sum'),
         interaction_count=('score', 'count')
@@ -180,10 +170,8 @@ def calculate_popular_by_persona(
         logger.warning(f"페르소나 '{persona_name}'의 충분한 반응을 가진 인기 콘텐츠가 없습니다.")
         return []
 
-    # 5. 상위 N개 콘텐츠 선택
     top_contents = content_popularity.nlargest(top_n, 'popularity_score')
 
-    # 6. 콘텐츠 정보 병합 및 응답 형식으로 변환
     merged_data = pd.merge(
         top_contents,
         fr_app_state.contents_df,
