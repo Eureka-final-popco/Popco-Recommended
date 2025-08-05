@@ -498,7 +498,7 @@ async def delete_review(user_id: int, review_id: int, db: Session = Depends(get_
 
 
 @persona_recommender_router.get("/users/{user_id}/recommendations", response_model=RecommendationResponse, summary="사용자 최신 추천 리스트 및 페르소나 점수 확인")
-async def get_user_recommendations(
+def get_user_recommendations(
     user_id: int,
     content_type: Optional[str] = None,
     db: Session = Depends(get_db)
