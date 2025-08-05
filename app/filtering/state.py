@@ -6,7 +6,6 @@ logger = logging.getLogger(__name__)
 
 class FilteringAppState:
     def __init__(self):
-        # 데이터프레임
         self.users_df: Optional[pd.DataFrame] = None
         self.contents_df: Optional[pd.DataFrame] = None
         self.reactions_df: Optional[pd.DataFrame] = None
@@ -19,7 +18,6 @@ class FilteringAppState:
         self.options_df: Optional[pd.DataFrame] = None
         self.user_qa_answers_df: Optional[pd.DataFrame] = None
 
-        # 매핑
         self.user_id_to_idx_map: Optional[Dict[int, int]] = None
         self.user_idx_to_id_map: Optional[Dict[int, int]] = None
         self.content_id_to_idx_map: Optional[Dict[Tuple[int, str], int]] = None
@@ -31,7 +29,6 @@ class FilteringAppState:
         self.persona_details_map: Optional[Dict[int, Dict[str, Any]]] = None 
         self.all_user_ids: List[int] = []
 
-        # 유사도 매트릭스 (필터링 로직에 따라 필요 없으면 제거)
         self.user_item_matrix: Optional[Any] = None
         self.user_similarity_df: Optional[pd.DataFrame] = None
         self.user_similarity_matrix: Optional[Any] = None

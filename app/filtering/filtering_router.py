@@ -1,6 +1,6 @@
 import logging
-from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, HTTPException, Query
+from typing import List, Optional
 import pandas as pd
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field 
@@ -40,7 +40,7 @@ class PopularContentListResponse(BaseModel):
 async def get_popular_by_age_group(
     age_group_min: int = Query(0, ge=0, description="연령대 최소 값 (예: 10, 20)"),
     age_group_max: int = Query(100, le=100, description="연령대 최대 값 (예: 19, 29)"),
-    limit: int = Query(RECOMMENDATION_COUNT, gt=0, le=50, description="반환할 콘텐츠 수")
+    limit: int = Query(RECOMMENDATION_COUNT, gt=0, le=100, description="반환할 콘텐츠 수")
 ):
     """
     지정된 연령대 범위의 사용자들에게 인기 있는 콘텐츠를 반환합니다.
@@ -48,12 +48,11 @@ async def get_popular_by_age_group(
     logger.info(f"연령대 {age_group_min}~{age_group_max}에 대한 인기 콘텐츠 요청 접수.")
 
     try:
-        raw_recommendations = filtering_generator.calculate_age_group_popularity( # 변수명 변경
+        raw_recommendations = filtering_generator.calculate_age_group_popularity(
             age_group_min=age_group_min,
             age_group_max=age_group_max,
             top_n=limit
         )
-        # Pydantic 모델 객체를 딕셔너리로 변환
         recommendations = [rec.model_dump(by_alias=True) for rec in raw_recommendations]
     except HTTPException:
         raise
@@ -78,7 +77,7 @@ async def get_popular_by_age_group(
 )
 async def get_popular_by_persona_id(
     persona_id: int, 
-    limit: int = Query(RECOMMENDATION_COUNT, gt=0, le=50, description="반환할 콘텐츠 수")
+    limit: int = Query(RECOMMENDATION_COUNT, gt=0, le=100, description="반환할 콘텐츠 수")
 ):
     """
     지정된 페르소나 ID에 속하는 사용자들에게 인기 있는 콘텐츠를 반환합니다.
@@ -90,7 +89,7 @@ async def get_popular_by_persona_id(
         raise HTTPException(status_code=404, detail=f"페르소나 ID '{persona_id}'를 찾을 수 없습니다.")
 
     try:
-        raw_recommendations = filtering_generator.calculate_popular_by_persona( # 변수명 변경
+        raw_recommendations = filtering_generator.calculate_popular_by_persona(
             persona_id=persona_id,
             top_n=limit
         )
