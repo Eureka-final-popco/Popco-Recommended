@@ -461,7 +461,7 @@ async def submit_feedback(
 
 
 @persona_recommender_router.get("/users/{user_id}/recommendations", response_model=RecommendationResponse)
-async def get_user_recommendations(
+def get_user_recommendations(
     user_id: int,
     content_type: Optional[str] = None,
     db: Session = Depends(get_db) # DB 세션을 의존성 주입으로 받습니다.
