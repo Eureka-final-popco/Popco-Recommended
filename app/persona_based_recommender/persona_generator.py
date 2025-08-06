@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Set
 from datetime import datetime
 from collections import defaultdict
+from decimal import Decimal, getcontext, ROUND_DOWN
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
@@ -21,6 +22,8 @@ from models import UserPersona, ContentReaction, Review, Persona, ReactionType
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+getcontext().prec = 20
 
 def _create_recommended_content(
     content_data: Dict,
@@ -545,7 +548,7 @@ def get_hybrid_persona(
         logger.warning(f"사용자 {user_id}에 대한 페르소나 점수를 계산할 수 없습니다. 기본값 반환.")
         return None, None, None, None, {}
 
-    sorted_personas = sorted(all_personas_scores.items(), key=lambda item: item[1], reverse=True)
+    sorted_personas = sorted(all_personas_scores.items(), key=lambda item: (-item[1], pbr_app_state.persona_name_to_id_map.get(item[0], float('inf'))))
 
     main_persona_name = None
     sub_persona_name = None
@@ -570,8 +573,25 @@ def get_hybrid_persona(
             sub_persona_id = None
             sub_persona_score = 0.0
 
-        if sub_persona_name is not None and (main_persona_score - sub_persona_score) < 10:
-            logger.info(f"사용자 {user_id}: 메인 페르소나 '{original_main_persona_name}'({main_persona_score:.2f})와 서브 페르소나 '{sub_persona_name}'({sub_persona_score:.2f})의 점수 차이가 10 미만이므로 '아기' 페르소나로 분류합니다 (표시용).")
+        is_baby_persona = False
+        if sub_persona_name is not None:
+            score1 = Decimal(str(main_persona_score))
+            score2 = Decimal(str(sub_persona_score))
+            totalScore = score1 + score2
+            
+            if totalScore.is_zero():
+                main_percentage = Decimal(0)
+                sub_percentage = Decimal(0)
+                is_baby_persona = True 
+            else:
+                main_percentage = (score1 / totalScore * Decimal(100)).to_integral_value(rounding=ROUND_DOWN)
+                sub_percentage = (score2 / totalScore * Decimal(100)).to_integral_value(rounding=ROUND_DOWN)
+
+                if abs(main_percentage - sub_percentage) < 8:
+                    is_baby_persona = True
+        
+        if is_baby_persona:
+            logger.info(f"사용자 {user_id}: 메인 페르소나 '{original_main_persona_name}'({main_persona_score:.2f})와 서브 페르소나 '{sub_persona_name}'({sub_persona_score:.2f})의 비율 차이가 8%포인트 미만이므로 '아기' 페르소나로 분류합니다.")
             
             main_persona_name = f"아기 {original_main_persona_name}" 
 
