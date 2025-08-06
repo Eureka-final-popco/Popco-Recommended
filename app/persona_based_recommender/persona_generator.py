@@ -580,7 +580,6 @@ def get_hybrid_persona(
             totalScore = score1 + score2
             
             if totalScore.is_zero():
-                # 합계가 0인 경우
                 main_percentage = Decimal(0)
                 sub_percentage = Decimal(0)
                 is_baby_persona = True
@@ -592,7 +591,7 @@ def get_hybrid_persona(
                     is_baby_persona = True
         
         if is_baby_persona:
-            logger.info(f"사용자 {user_id}: 메인 페르소나 '{original_main_persona_name}'({main_persona_score:.2f})와 서브 페르소나 '{sub_persona_name}'({sub_persona_score:.2f})의 비율 차이가 8%포인트 미만이므로 '아기' 페르소나로 분류합니다 (표시용).")
+            logger.info(f"사용자 {user_id}: 메인 페르소나 '{original_main_persona_name}'({main_persona_score:.2f})와 서브 페르소나 '{sub_persona_name}'({sub_persona_score:.2f})의 비율 차이가 8%포인트 미만이므로 '아기' 페르소나로 분류합니다.")
             
             main_persona_name = f"아기 {original_main_persona_name}" 
 
