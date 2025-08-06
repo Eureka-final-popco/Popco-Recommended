@@ -582,10 +582,10 @@ def get_hybrid_persona(
             if totalScore.is_zero():
                 main_percentage = Decimal(0)
                 sub_percentage = Decimal(0)
-                is_baby_persona = True
+                is_baby_persona = True 
             else:
                 main_percentage = (score1 / totalScore * Decimal(100)).to_integral_value(rounding=ROUND_DOWN)
-                sub_percentage = Decimal(100) - main_percentage
+                sub_percentage = (score2 / totalScore * Decimal(100)).to_integral_value(rounding=ROUND_DOWN)
 
                 if abs(main_percentage - sub_percentage) < 8:
                     is_baby_persona = True
