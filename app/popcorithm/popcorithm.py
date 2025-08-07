@@ -3,9 +3,9 @@ from typing import Dict, List
 import numpy as np
 
 def calculate_user_preferences(activities: List[Dict], 
-                             genre_weight: float = 0.1,
-                             actor_weight: float = 0.7, 
-                             director_weight: float = 0.2) -> Dict:
+                             genre_weight: float = 0.375,
+                             actor_weight: float = 0.525, 
+                             director_weight: float = 0.1) -> Dict:
     """
     사용자 활동 데이터로부터 선호도 프로필을 계산
     
